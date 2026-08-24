@@ -8,3 +8,4 @@ nidaqmx
 openpyxl
 kaitaistruct
 requests
+qtpy
