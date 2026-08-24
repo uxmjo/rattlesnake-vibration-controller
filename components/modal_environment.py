@@ -144,7 +144,14 @@ class ModalMetadata(AbstractMetadata):
                  response_channel_indices,
                  output_channel_indices,
                  data_acquisition_parameters : DataAcquisitionParameters,
-                 exponential_window_value_at_frame_end : float
+                 exponential_window_value_at_frame_end : float,
+                 control_enabled : bool = False,
+                 control_python_script = None,
+                 control_python_function = None,
+                 control_python_function_type = None,
+                 control_python_function_parameters = None,
+                 control_target_channel_index = None,
+                 control_target_amplitude = None,
                  ):
         self.sample_rate = sample_rate
         self.samples_per_frame = samples_per_frame
@@ -173,6 +180,13 @@ class ModalMetadata(AbstractMetadata):
         self.response_channel_indices = response_channel_indices
         self.output_channel_indices = output_channel_indices
         self.exponential_window_value_at_frame_end = exponential_window_value_at_frame_end
+        self.control_enabled = control_enabled
+        self.control_python_script = control_python_script
+        self.control_python_function = control_python_function
+        self.control_python_function_type = control_python_function_type
+        self.control_python_function_parameters = control_python_function_parameters
+        self.control_target_channel_index = control_target_channel_index
+        self.control_target_amplitude = control_target_amplitude
         # Set up signal generator
         self.output_oversample = data_acquisition_parameters.output_oversample
         self.signal_generator = self.get_signal_generator()
@@ -364,6 +378,13 @@ class ModalMetadata(AbstractMetadata):
         netcdf_group_handle.signal_generator_on_fraction = self.signal_generator_on_fraction
         netcdf_group_handle.exponential_window_value_at_frame_end = self.exponential_window_value_at_frame_end
         netcdf_group_handle.acceptance_function = self.acceptance_function[0]+':'+self.acceptance_function[1] if not self.acceptance_function is None else 'None'
+        netcdf_group_handle.control_enabled = 1 if self.control_enabled else 0
+        netcdf_group_handle.control_python_script = self.control_python_script if self.control_python_script else 'None'
+        netcdf_group_handle.control_python_function = self.control_python_function if self.control_python_function else 'None'
+        netcdf_group_handle.control_python_function_type = -1 if self.control_python_function_type is None else self.control_python_function_type
+        netcdf_group_handle.control_python_function_parameters = self.control_python_function_parameters if self.control_python_function_parameters else ''
+        netcdf_group_handle.control_target_channel_index = -1 if self.control_target_channel_index is None else self.control_target_channel_index
+        netcdf_group_handle.control_target_amplitude = 0.0 if self.control_target_amplitude is None else self.control_target_amplitude
         # Reference channels
         netcdf_group_handle.createDimension('reference_channels',len(self.reference_channel_indices))
         var = netcdf_group_handle.createVariable('reference_channel_indices','i4',('reference_channels'))
@@ -425,6 +446,23 @@ class ModalMetadata(AbstractMetadata):
             signal_generator_type = 'sine'
             signal_generator_level = ui.definition_widget.sine_level_selector.value()
             signal_generator_min_frequency = ui.definition_widget.sine_frequency_selector.value()
+        if ui.definition_widget.control_enabled_checkbox.isChecked():
+            control_enabled = True
+            control_python_script = ui.definition_widget.control_script_file_path_input.text()
+            control_python_function = ui.definition_widget.control_function_input.itemText(
+                ui.definition_widget.control_function_input.currentIndex())
+            control_python_function_type = ui.definition_widget.control_function_generator_selector.currentIndex()
+            control_python_function_parameters = ui.definition_widget.control_parameters_text_input.toPlainText()
+            control_target_channel_index = ui.definition_widget.control_target_channel_selector.currentData()
+            control_target_amplitude = ui.definition_widget.control_target_amplitude_selector.value()
+        else:
+            control_enabled = False
+            control_python_script = None
+            control_python_function = None
+            control_python_function_type = None
+            control_python_function_parameters = None
+            control_target_channel_index = None
+            control_target_amplitude = None
         return cls(
             ui.definition_widget.sample_rate_display.value(),
             ui.definition_widget.samples_per_frame_selector.value(),
@@ -453,7 +491,14 @@ class ModalMetadata(AbstractMetadata):
             ui.response_indices,
             ui.all_output_channel_indices,
             ui.data_acquisition_parameters,
-            ui.definition_widget.window_value_selector.value()/100
+            ui.definition_widget.window_value_selector.value()/100,
+            control_enabled,
+            control_python_script,
+            control_python_function,
+            control_python_function_type,
+            control_python_function_parameters,
+            control_target_channel_index,
+            control_target_amplitude,
             )
 
     def generate_signal(self):
@@ -577,6 +622,16 @@ class ModalUI(AbstractUI):
         self.environment_parameters = None
         self.channel_names = None
         self.acceptance_function = None
+        self.python_control_module = None
+        self.control_law_widgets = [
+            self.definition_widget.control_target_channel_selector,
+            self.definition_widget.control_target_amplitude_selector,
+            self.definition_widget.control_script_file_path_input,
+            self.definition_widget.control_script_load_file_button,
+            self.definition_widget.control_function_input,
+            self.definition_widget.control_function_generator_selector,
+            self.definition_widget.control_parameters_text_input,
+            ]
         self.plot_data_items = {}
         self.reference_channel_indices = None
         self.all_output_channel_indices = None
@@ -652,7 +707,8 @@ class ModalUI(AbstractUI):
         self.definition_widget.system_id_averaging_coefficient_selector.setEnabled(False)
         for widget in self.window_parameter_widgets:
             widget.hide()
-        
+        self.activate_control_law_options()
+
     def connect_callbacks(self):
         # Definition Callbacks
         self.definition_widget.samples_per_frame_selector.valueChanged.connect(self.update_parameters)
@@ -673,6 +729,9 @@ class ModalUI(AbstractUI):
         self.definition_widget.hysteresis_length_selector.valueChanged.connect(self.update_hysteresis_length)
         self.definition_widget.system_id_averaging_scheme_selector.currentIndexChanged.connect(self.update_averaging_type)
         self.definition_widget.system_id_transfer_function_computation_window_selector.currentIndexChanged.connect(self.update_window)
+        self.definition_widget.control_enabled_checkbox.stateChanged.connect(self.activate_control_law_options)
+        self.definition_widget.control_script_load_file_button.clicked.connect(self.select_control_python_module)
+        self.definition_widget.control_function_input.currentIndexChanged.connect(self.update_control_generator_selector)
         # Run Callbacks
         self.run_widget.preview_test_button.clicked.connect(self.preview_acquisition)
         self.run_widget.start_test_button.clicked.connect(self.start_control)
@@ -709,6 +768,14 @@ class ModalUI(AbstractUI):
         self.definition_widget.response_channels_display.setValue(len(self.response_indices))
         self.definition_widget.reference_channels_display.setValue(len(self.reference_indices))
         self.definition_widget.output_channels_display.setValue(len(self.output_channel_indices))
+        current = self.definition_widget.control_target_channel_selector.currentData()
+        self.definition_widget.control_target_channel_selector.blockSignals(True)
+        self.definition_widget.control_target_channel_selector.clear()
+        for i in self.reference_indices:
+            self.definition_widget.control_target_channel_selector.addItem(self.channel_names[i], i)
+        index = self.definition_widget.control_target_channel_selector.findData(current)
+        self.definition_widget.control_target_channel_selector.setCurrentIndex(index if index >= 0 else 0)
+        self.definition_widget.control_target_channel_selector.blockSignals(False)
         if self.definition_widget.regenerate_signal_auto_checkbox.isChecked():
             self.generate_signal()
 
@@ -767,6 +834,43 @@ class ModalUI(AbstractUI):
                 return
         else:
             self.acceptance_function = None
+
+    def activate_control_law_options(self):
+        enabled = self.definition_widget.control_enabled_checkbox.isChecked()
+        for widget in self.control_law_widgets:
+            widget.setEnabled(enabled)
+
+    def select_control_python_module(self,clicked,filename=None):
+        if filename is None:
+            filename,file_filter = QtWidgets.QFileDialog.getOpenFileName(
+                self.definition_widget,'Select Python Module',filter='Python Modules (*.py)')
+            if filename == '':
+                return
+        self.python_control_module = load_python_module(filename)
+        functions = [function for function in inspect.getmembers(self.python_control_module)
+                     if (inspect.isfunction(function[1]) and len(inspect.signature(function[1]).parameters) >= 6)
+                     or inspect.isgeneratorfunction(function[1])
+                     or (inspect.isclass(function[1]) and 'control' in function[1].__dict__)]
+        self.log('Loaded module {:} with functions {:}'.format(
+            self.python_control_module.__name__,[function[0] for function in functions]))
+        self.definition_widget.control_function_input.clear()
+        self.definition_widget.control_script_file_path_input.setText(filename)
+        for function in functions:
+            self.definition_widget.control_function_input.addItem(function[0])
+
+    def update_control_generator_selector(self):
+        if self.python_control_module is None:
+            return
+        index = self.definition_widget.control_function_input.currentIndex()
+        if index < 0:
+            return
+        function = getattr(self.python_control_module,self.definition_widget.control_function_input.itemText(index))
+        if inspect.isgeneratorfunction(function):
+            self.definition_widget.control_function_generator_selector.setCurrentIndex(1)
+        elif inspect.isclass(function):
+            self.definition_widget.control_function_generator_selector.setCurrentIndex(2)
+        else:
+            self.definition_widget.control_function_generator_selector.setCurrentIndex(0)
 
     def update_trigger_levels(self):
         data = self.collect_environment_definition_parameters()
@@ -1324,7 +1428,19 @@ class ModalUI(AbstractUI):
                 widget.setChecked(False)
                 widget = self.definition_widget.reference_channels_selector.cellWidget(row,1)
                 widget.setChecked(False)
-                
+        control_enabled = getattr(netcdf_group_handle,'control_enabled',0) == 1
+        self.definition_widget.control_enabled_checkbox.setChecked(control_enabled)
+        if control_enabled:
+            self.select_control_python_module(None,netcdf_group_handle.control_python_script)
+            self.definition_widget.control_function_input.setCurrentIndex(
+                self.definition_widget.control_function_input.findText(netcdf_group_handle.control_python_function))
+            self.definition_widget.control_parameters_text_input.setText(netcdf_group_handle.control_python_function_parameters)
+            self.definition_widget.control_target_amplitude_selector.setValue(netcdf_group_handle.control_target_amplitude)
+            index = self.definition_widget.control_target_channel_selector.findData(netcdf_group_handle.control_target_channel_index)
+            if index >= 0:
+                self.definition_widget.control_target_channel_selector.setCurrentIndex(index)
+        self.activate_control_law_options()
+
     def update_gui(self,queue_data : tuple):
         """Update the environment's graphical user interface
         
@@ -1380,6 +1496,10 @@ class ModalUI(AbstractUI):
                 self.acquiring = False
             # else:
             #     print('Continuing Control')
+        elif message == 'control_law_update':
+            (frames,target_amplitude,measured_amplitude,new_level) = data
+            self.run_widget.control_measured_amplitude_display.setValue(measured_amplitude)
+            self.run_widget.control_current_level_display.setValue(new_level)
         elif message == 'time_frame':
             frame,accepted = data
             self.run_widget.channel_display_area.last_frame = frame
@@ -1647,7 +1767,13 @@ class ModalEnvironment(AbstractEnvironment):
         self.siggen_shutdown_achieved = False
         self.collector_shutdown_achieved = False
         self.spectral_shutdown_achieved = False
-        
+        self.control_function = None
+        self.control_function_type = None
+        self.control_extra_parameters = None
+        self.control_target_channel_position = None
+        self.current_level = None
+        self.current_frequency = None
+
         # Map commands
         self.map_command(ModalCommands.ACCEPT_FRAME,self.accept_frame)
         self.map_command(ModalCommands.START_CONTROL,self.start_environment)
@@ -1686,7 +1812,35 @@ class ModalEnvironment(AbstractEnvironment):
 
         """
         self.environment_parameters = environment_parameters
-        
+
+        # Set up the closed-loop control law, if enabled
+        self.control_function = None
+        if getattr(environment_parameters,'control_enabled',False):
+            module = load_python_module(environment_parameters.control_python_script)
+            self.control_function_type = environment_parameters.control_python_function_type
+            self.control_extra_parameters = environment_parameters.control_python_function_parameters
+            try:
+                self.control_target_channel_position = list(
+                    environment_parameters.reference_channel_indices).index(
+                        environment_parameters.control_target_channel_index)
+            except ValueError:
+                self.log('Control target channel not found in reference channels -- disabling closed-loop control')
+            else:
+                self.current_level = environment_parameters.signal_generator_level
+                self.current_frequency = environment_parameters.signal_generator_min_frequency
+                if self.control_function_type == 1: # Generator
+                    generator_function = getattr(module,environment_parameters.control_python_function)()
+                    next(generator_function)
+                    self.control_function = generator_function.send
+                elif self.control_function_type == 2: # Class
+                    self.control_function = getattr(module,environment_parameters.control_python_function)(
+                        environment_parameters.control_target_amplitude,
+                        self.control_extra_parameters,
+                        self.current_level,
+                        self.current_frequency)
+                else: # Function
+                    self.control_function = getattr(module,environment_parameters.control_python_function)
+
         # Set up the collector
         self.queue_container.collector_command_queue.put(
             self.environment_name,
@@ -1892,6 +2046,29 @@ class ModalEnvironment(AbstractEnvironment):
                                         response_cpsd,
                                         reference_cpsd,
                                         condition))))
+            if self.control_function is not None:
+                freq_index = int(np.argmin(np.abs(frequencies - self.current_frequency)))
+                df = frequencies[1] - frequencies[0]
+                force_psd = reference_cpsd[freq_index,self.control_target_channel_position].real
+                measured_amplitude = float(np.sqrt(max(force_psd,0.0)*df))
+                target_amplitude = self.environment_parameters.control_target_amplitude
+                if self.control_function_type == 1: # Generator
+                    new_level = self.control_function((
+                        target_amplitude,measured_amplitude,self.current_level,
+                        self.current_frequency,self.control_extra_parameters,frames))
+                elif self.control_function_type == 2: # Class
+                    new_level = self.control_function.control(
+                        measured_amplitude,self.current_level,self.current_frequency,frames)
+                else: # Function
+                    new_level = self.control_function(
+                        target_amplitude,measured_amplitude,self.current_level,
+                        self.current_frequency,self.control_extra_parameters,frames)
+                self.current_level = new_level
+                self.queue_container.signal_generation_update_queue.put(
+                    (self.current_frequency,new_level))
+                self.gui_update_queue.put((self.environment_name,
+                                           ('control_law_update',
+                                            (frames,target_amplitude,measured_amplitude,new_level))))
         else:
             time.sleep(WAIT_TIME)
         self.queue_container.environment_command_queue.put(

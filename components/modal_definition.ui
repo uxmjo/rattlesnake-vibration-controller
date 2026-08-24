@@ -1934,6 +1934,194 @@ References</string>
        </item>
       </layout>
      </item>
+     <item>
+      <widget class="QGroupBox" name="control_law_groupbox">
+       <property name="title">
+        <string>Closed-Loop Control</string>
+       </property>
+       <layout class="QVBoxLayout" name="control_law_groupbox_layout">
+        <item>
+         <widget class="QCheckBox" name="control_enabled_checkbox">
+          <property name="toolTip">
+           <string>Regulate the signal generator level each frame using a pluggable control law, based on the measured amplitude of a reference channel.</string>
+          </property>
+          <property name="text">
+           <string>Enable Closed-Loop Force Control</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="control_target_channel_layout">
+          <item>
+           <widget class="QLabel" name="control_target_channel_label">
+            <property name="text">
+             <string>Force/Reference Channel to Control</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QComboBox" name="control_target_channel_selector">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="MinimumExpanding" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="toolTip">
+             <string>The reference channel whose measured amplitude the control law will regulate.</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="control_target_amplitude_layout">
+          <item>
+           <widget class="QLabel" name="control_target_amplitude_label">
+            <property name="text">
+             <string>Target Amplitude</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QDoubleSpinBox" name="control_target_amplitude_selector">
+            <property name="toolTip">
+             <string>The constant amplitude the control law will attempt to maintain on the target channel.</string>
+            </property>
+            <property name="decimals">
+             <number>4</number>
+            </property>
+            <property name="maximum">
+             <double>999999999.000000000</double>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QVBoxLayout" name="control_script_vertical_layout">
+          <item>
+           <widget class="QLabel" name="control_script_label">
+            <property name="text">
+             <string>Control Python Script</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="control_script_horizontal_layout">
+            <item>
+             <widget class="QLineEdit" name="control_script_file_path_input">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+              <property name="toolTip">
+               <string>Python script used to specify the control law.</string>
+              </property>
+              <property name="readOnly">
+               <bool>true</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="control_script_load_file_button">
+              <property name="toolTip">
+               <string>Loads in a Python script to use as the control strategy</string>
+              </property>
+              <property name="text">
+               <string>Load</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QVBoxLayout" name="control_function_layout">
+          <item>
+           <widget class="QLabel" name="control_function_label">
+            <property name="text">
+             <string>Control Python Function</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="control_function_generator_layout">
+            <item>
+             <widget class="QComboBox" name="control_function_input">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="MinimumExpanding" vsizetype="Fixed">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+              <property name="toolTip">
+               <string>Select the item within the script to use as the control law.</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QComboBox" name="control_function_generator_selector">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+              <property name="toolTip">
+               <string>Select if the selected control law is a Function, Generator, or Class</string>
+              </property>
+              <item>
+               <property name="text">
+                <string>Function</string>
+               </property>
+              </item>
+              <item>
+               <property name="text">
+                <string>Generator</string>
+               </property>
+              </item>
+              <item>
+               <property name="text">
+                <string>Class</string>
+               </property>
+              </item>
+             </widget>
+            </item>
+           </layout>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QVBoxLayout" name="control_parameters_layout">
+          <item>
+           <widget class="QLabel" name="control_parameters_label">
+            <property name="text">
+             <string>Control Parameters</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QTextEdit" name="control_parameters_text_input">
+            <property name="toolTip">
+             <string>Any additional parameters needed by the control law are entered in this text box.  It is up to the control law to define what is needed to be defined in this box.</string>
+            </property>
+            <property name="lineWrapMode">
+             <enum>QTextEdit::NoWrap</enum>
+            </property>
+            <property name="acceptRichText">
+             <bool>false</bool>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+       </layout>
+      </widget>
+     </item>
     </layout>
    </item>
   </layout>
