@@ -11,6 +11,7 @@ Usage
 If --group is omitted, the first (and normally only) group in the file is used.
 """
 import argparse
+import sys
 import numpy as np
 import netCDF4 as nc4
 import matplotlib.pyplot as plt
@@ -105,7 +106,11 @@ def plot_diagnostics(data, metadata, group_name):
 
 
 if __name__ == '__main__':
+<<<<<<< HEAD
     """
+=======
+    print('DEBUG sys.argv:', sys.argv)
+>>>>>>> 09147f310b4f07b0e2e59c5db122fac958f984b5
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('filename', help='Path to the .nc4 diagnostics file')
     parser.add_argument('--group', default=None,
