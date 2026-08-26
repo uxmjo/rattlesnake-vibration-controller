@@ -47,4 +47,5 @@ def constant_force_amplitude(target_amplitude, measured_amplitude, current_level
     else:
         ratio = target_amplitude / measured_amplitude
         ratio = np.clip(ratio, 1.0 - max_step_fraction, 1.0 + max_step_fraction)
-    return max(current_level * ratio, 0.0)
+        res = np.clip(current_level * ratio, 0.0, 1.25/np.sqrt(2))
+    return max(res, 0.0)
