@@ -37,6 +37,7 @@ class ControlTypes(Enum):
     TIME = 4
     # NONLINEAR = 5
     MODAL = 6
+    SINE_FORCE = 7
     # Add new environment types here
 
 # Name for each environment
@@ -47,6 +48,7 @@ environment_long_names[ControlTypes.TRANSIENT] = 'MIMO Transient'
 environment_long_names[ControlTypes.TIME] = 'Time Signal Generation'
 # environment_long_names[ControlTypes.NONLINEAR] = 'Nonlinear Normal Modes'
 environment_long_names[ControlTypes.MODAL] = 'Modal Testing'
+environment_long_names[ControlTypes.SINE_FORCE] = 'Sine Force Control'
 environment_long_names[ControlTypes.COMBINED] = 'Combined Environments...'
 
 # Add the environment here if it can be used for combined environments
@@ -88,6 +90,9 @@ environment_run_ui_paths[ControlTypes.TRANSIENT] = os.path.join(directory,'trans
 environment_definition_ui_paths[ControlTypes.MODAL] = os.path.join(directory,'modal_definition.ui')
 environment_run_ui_paths[ControlTypes.MODAL] = os.path.join(directory,'modal_run.ui')
 modal_mdi_ui_path = os.path.join(directory,'modal_acquisition_window.ui')
+# Sine Force Control Environment
+environment_definition_ui_paths[ControlTypes.SINE_FORCE] = os.path.join(directory,'sine_force_control_definition.ui')
+environment_run_ui_paths[ControlTypes.SINE_FORCE] = os.path.join(directory,'sine_force_control_run.ui')
 
 # Import the process function and the UI from the module and add them to the
 # respective dictionaries
@@ -109,5 +114,9 @@ environment_UIs[ControlTypes.TRANSIENT] = TransientUI
 from .modal_environment import modal_process,ModalUI
 environment_processes[ControlTypes.MODAL] = modal_process
 environment_UIs[ControlTypes.MODAL] = ModalUI
+# Sine Force Control
+from .sine_force_control_environment import sine_force_control_process,SineForceControlUI
+environment_processes[ControlTypes.SINE_FORCE] = sine_force_control_process
+environment_UIs[ControlTypes.SINE_FORCE] = SineForceControlUI
 
 ### End of code needed to be modified to create a new environment

@@ -9,3 +9,4 @@ openpyxl
 kaitaistruct
 requests
 qtpy
+pytest

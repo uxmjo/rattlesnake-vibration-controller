@@ -1,0 +1,556 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>Form</class>
+ <widget class="QWidget" name="Form">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>900</width>
+    <height>720</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Form</string>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <widget class="QGroupBox" name="sweep_groupbox">
+     <property name="title">
+      <string>Sine Sweep</string>
+     </property>
+     <layout class="QGridLayout" name="sweep_layout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="sweep_type_label">
+        <property name="text">
+         <string>Sweep Type</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QComboBox" name="sweep_type_selector">
+        <property name="toolTip">
+         <string>Linear (Hz/s) or Logarithmic (octaves/min) frequency sweep.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="2">
+       <widget class="QLabel" name="direction_label">
+        <property name="text">
+         <string>Direction</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="3">
+       <widget class="QComboBox" name="direction_selector">
+        <property name="toolTip">
+         <string>Up sweeps Start-&gt;Stop frequency; Down sweeps Stop-&gt;Start frequency.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="4">
+       <widget class="QCheckBox" name="repeat_sweep_checkbox">
+        <property name="toolTip">
+         <string>If checked, the sweep restarts from the beginning once it reaches the end, instead of holding at the final frequency.</string>
+        </property>
+        <property name="text">
+         <string>Repeat</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="start_frequency_label">
+        <property name="text">
+         <string>Start Frequency</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QDoubleSpinBox" name="start_frequency_selector">
+        <property name="toolTip">
+         <string>Sweep start frequency (before Direction is applied).</string>
+        </property>
+        <property name="suffix">
+         <string> Hz</string>
+        </property>
+        <property name="decimals">
+         <number>3</number>
+        </property>
+        <property name="minimum">
+         <double>0.100000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>20000.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>20.000000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="2">
+       <widget class="QLabel" name="stop_frequency_label">
+        <property name="text">
+         <string>Stop Frequency</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="3">
+       <widget class="QDoubleSpinBox" name="stop_frequency_selector">
+        <property name="toolTip">
+         <string>Sweep stop frequency (before Direction is applied).</string>
+        </property>
+        <property name="suffix">
+         <string> Hz</string>
+        </property>
+        <property name="decimals">
+         <number>3</number>
+        </property>
+        <property name="minimum">
+         <double>0.100000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>20000.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>500.000000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="4">
+       <widget class="QLabel" name="sweep_rate_label">
+        <property name="text">
+         <string>Sweep Rate</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="5">
+       <widget class="QDoubleSpinBox" name="sweep_rate_selector">
+        <property name="toolTip">
+         <string>Linear: Hz/s. Logarithmic: octaves/minute. Units update automatically based on Sweep Type.</string>
+        </property>
+        <property name="decimals">
+         <number>4</number>
+        </property>
+        <property name="minimum">
+         <double>0.000100000000000</double>
+        </property>
+        <property name="maximum">
+         <double>100000.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>10.000000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="sample_rate_label">
+        <property name="text">
+         <string>Sample Rate</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QDoubleSpinBox" name="sample_rate_display">
+        <property name="toolTip">
+         <string>Data acquisition sample rate (read only, informational).</string>
+        </property>
+        <property name="readOnly">
+         <bool>true</bool>
+        </property>
+        <property name="buttonSymbols">
+         <enum>QAbstractSpinBox::NoButtons</enum>
+        </property>
+        <property name="suffix">
+         <string> Hz</string>
+        </property>
+        <property name="maximum">
+         <double>1000000.000000000000000</double>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="force_control_groupbox">
+     <property name="title">
+      <string>Force Control</string>
+     </property>
+     <layout class="QGridLayout" name="force_control_layout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="force_channel_label">
+        <property name="text">
+         <string>Force Control Channel</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1" colspan="3">
+       <widget class="QComboBox" name="force_channel_selector">
+        <property name="toolTip">
+         <string>The measurement channel (e.g. the Kistler force sensor) whose amplitude is regulated. Its engineering-unit calibration (sensitivity) is taken from the main channel table -- not hardcoded here.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="target_force_label">
+        <property name="text">
+         <string>Target Force</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QDoubleSpinBox" name="target_force_selector">
+        <property name="toolTip">
+         <string>Desired constant force amplitude, N_peak.</string>
+        </property>
+        <property name="suffix">
+         <string> N peak</string>
+        </property>
+        <property name="decimals">
+         <number>3</number>
+        </property>
+        <property name="maximum">
+         <double>100000.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>5.000000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="2">
+       <widget class="QLabel" name="force_floor_label">
+        <property name="text">
+         <string>Force Floor</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="3">
+       <widget class="QDoubleSpinBox" name="force_floor_selector">
+        <property name="toolTip">
+         <string>Minimum force amplitude treated as a usable measurement. Below this, the controller holds the drive amplitude instead of dividing by a near-zero reading.</string>
+        </property>
+        <property name="suffix">
+         <string> N peak</string>
+        </property>
+        <property name="decimals">
+         <number>4</number>
+        </property>
+        <property name="maximum">
+         <double>10000.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>0.100000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="tracking_bandwidth_label">
+        <property name="text">
+         <string>Tracking Bandwidth</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QDoubleSpinBox" name="tracking_bandwidth_selector">
+        <property name="toolTip">
+         <string>-3dB bandwidth of the I/Q tracking filter. Narrow = less noise but slower response; wide = faster response but noisier.</string>
+        </property>
+        <property name="suffix">
+         <string> Hz</string>
+        </property>
+        <property name="decimals">
+         <number>3</number>
+        </property>
+        <property name="minimum">
+         <double>0.010000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>10000.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>5.000000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="2">
+       <widget class="QLabel" name="controller_alpha_label">
+        <property name="text">
+         <string>Controller Alpha</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="3">
+       <widget class="QDoubleSpinBox" name="controller_alpha_selector">
+        <property name="toolTip">
+         <string>Controller gain exponent, 0 &lt; alpha &lt;= 1. Smaller = more conservative per-update correction.</string>
+        </property>
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="minimum">
+         <double>0.010000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>1.000000000000000</double>
+        </property>
+        <property name="singleStep">
+         <double>0.050000000000000</double>
+        </property>
+        <property name="value">
+         <double>0.500000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="control_update_period_label">
+        <property name="text">
+         <string>Control Update Period</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QDoubleSpinBox" name="control_update_period_selector">
+        <property name="toolTip">
+         <string>How often the drive amplitude is recomputed, independent of the DAQ block size (samples_per_frame).</string>
+        </property>
+        <property name="suffix">
+         <string> s</string>
+        </property>
+        <property name="decimals">
+         <number>3</number>
+        </property>
+        <property name="minimum">
+         <double>0.001000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>60.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>0.100000000000000</double>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="drive_limits_groupbox">
+     <property name="title">
+      <string>Drive Amplitude Limits</string>
+     </property>
+     <layout class="QGridLayout" name="drive_limits_layout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="initial_drive_label">
+        <property name="text">
+         <string>Initial Drive</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QDoubleSpinBox" name="initial_drive_selector">
+        <property name="toolTip">
+         <string>Small nonzero starting drive amplitude the output ramps up to before the force controller takes over. Must be &gt; 0 (a purely multiplicative controller cannot move away from exactly zero).</string>
+        </property>
+        <property name="suffix">
+         <string> V peak</string>
+        </property>
+        <property name="decimals">
+         <number>4</number>
+        </property>
+        <property name="minimum">
+         <double>0.000100000000000</double>
+        </property>
+        <property name="maximum">
+         <double>100.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>0.050000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="2">
+       <widget class="QLabel" name="max_drive_label">
+        <property name="text">
+         <string>Max Drive (Control Limit)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="3">
+       <widget class="QDoubleSpinBox" name="max_drive_selector">
+        <property name="toolTip">
+         <string>Soft limit: the controller itself will never request more than this. Default 1.25 V_peak is taken from the specific PA500L/V406 commissioning procedure this project used (2.5 Vpp signal generator limit) -- VERIFY against the actual hardware configuration in use before any real test.</string>
+        </property>
+        <property name="suffix">
+         <string> V peak</string>
+        </property>
+        <property name="decimals">
+         <number>4</number>
+        </property>
+        <property name="minimum">
+         <double>0.000100000000000</double>
+        </property>
+        <property name="maximum">
+         <double>100.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>1.250000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="abort_drive_label">
+        <property name="text">
+         <string>Abort Drive Limit</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QDoubleSpinBox" name="abort_drive_selector">
+        <property name="toolTip">
+         <string>Hard safety limit, independent of the controller: if the commanded drive amplitude ever exceeds this, the environment immediately mutes output and requests a global hardware stop. Must be greater than Max Drive. VERIFY against actual hardware before real testing.</string>
+        </property>
+        <property name="suffix">
+         <string> V peak</string>
+        </property>
+        <property name="decimals">
+         <number>4</number>
+        </property>
+        <property name="minimum">
+         <double>0.000100000000000</double>
+        </property>
+        <property name="maximum">
+         <double>100.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>1.400000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="2">
+       <widget class="QLabel" name="max_drive_step_label">
+        <property name="text">
+         <string>Max Drive Change / Update</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="3">
+       <widget class="QDoubleSpinBox" name="max_drive_step_selector">
+        <property name="toolTip">
+         <string>Maximum absolute change in drive amplitude allowed per control update (slew-rate limit).</string>
+        </property>
+        <property name="suffix">
+         <string> V</string>
+        </property>
+        <property name="decimals">
+         <number>4</number>
+        </property>
+        <property name="minimum">
+         <double>0.000100000000000</double>
+        </property>
+        <property name="maximum">
+         <double>100.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>0.020000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="ramp_time_label">
+        <property name="text">
+         <string>Ramp Time</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QDoubleSpinBox" name="ramp_time_selector">
+        <property name="toolTip">
+         <string>Time to smoothly ramp the output gate 0-&gt;1 at startup (after which the force controller takes over) and 1-&gt;0 at a normal stop.</string>
+        </property>
+        <property name="suffix">
+         <string> s</string>
+        </property>
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="minimum">
+         <double>0.010000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>60.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>1.000000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0" colspan="4">
+       <widget class="QLabel" name="warning_abort_note_label">
+        <property name="text">
+         <string>Note: Force channel Warning/Abort levels are configured in the main DAQ Channel Table (existing mechanism), not here.</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="logging_groupbox">
+     <property name="title">
+      <string>Diagnostics Logging</string>
+     </property>
+     <layout class="QHBoxLayout" name="logging_layout">
+      <item>
+       <widget class="QLineEdit" name="data_file_selector">
+        <property name="toolTip">
+         <string>NetCDF file in which controller diagnostics (frequency, target/measured force, drive amplitude, status) will be logged.</string>
+        </property>
+        <property name="readOnly">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="select_file_button">
+        <property name="text">
+         <string>Select File</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="autoincrement_checkbox">
+        <property name="toolTip">
+         <string>Automatically append an incrementing index to the file name to avoid overwriting previous data.</string>
+        </property>
+        <property name="text">
+         <string>Autoincrement</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <spacer name="definition_spacer">
+     <property name="orientation">
+      <enum>Qt::Vertical</enum>
+     </property>
+     <property name="sizeHint" stdset="0">
+      <size>
+       <width>20</width>
+       <height>40</height>
+      </size>
+     </property>
+    </spacer>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

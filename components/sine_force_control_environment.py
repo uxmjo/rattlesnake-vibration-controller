@@ -1,0 +1,755 @@
+# -*- coding: utf-8 -*-
+"""
+Closed-loop force-controlled continuous sine sweep environment.
+
+Drives an electromagnetic shaker with a phase-continuous sine sweep whose
+*amplitude* (not frequency) is continuously adjusted so a measured force
+channel tracks a target force amplitude, per the architecture:
+
+    SineSweepGenerator (output)          ForceTrackingEstimator (input)
+            |                                      |
+            v                                      v
+    data_out_queue <-- drive_amplitude --  ForceAmplitudeController
+                                                     ^
+                                          control_update_period_s (sample-
+                                          counted, independent of DAQ block
+                                          size / samples_per_frame)
+
+This environment follows the same single-process, raw-block data flow as
+``components/time_environment.py`` (documented there as the template for new
+control types): ``data_in_queue`` delivers raw, already-calibrated time
+blocks (no FFT), and ``data_out_queue`` receives raw output blocks -- there
+is no FFT-bin dependency anywhere in the control path (see
+``force_tracking_estimator.py``).
+
+Because acquisition (input) and generation (output) are pipelined with some
+latency, the phase/frequency reference used to demodulate an *incoming*
+force block is produced by a second ``SineSweepGenerator`` instance
+(``_input_phase_generator``) configured identically to the output generator
+but advanced by *input* samples consumed rather than *output* samples
+generated. Since the frequency law is a pure function of elapsed time (see
+``sine_sweep_generator.py``), both generators track the same trajectory,
+offset by only the roughly-constant pipeline latency -- which does not
+corrupt the amplitude estimate (see ``force_tracking_estimator.py``
+docstring), provided the sweep is slow relative to that latency (the
+existing quasi-stationary-sweep assumption of this whole design).
+
+Safety notes (see also the module-level report delivered alongside this
+file):
+
+* Per-channel Warning/Abort levels are configured in the main DAQ channel
+  table and enforced by the existing, unmodified
+  ``components/acquisition.py`` mechanism -- this environment does not
+  duplicate that. It only adds a *second*, independent hard safety net on
+  the drive voltage itself (``abort_drive_v``), since that is a quantity
+  internal to this environment that the generic channel-table mechanism has
+  no visibility into.
+* ``max_drive_v`` is the *control* limit (the controller will never request
+  more). ``abort_drive_v`` is the *safety* limit: if the commanded drive
+  amplitude ever exceeds it (which should be impossible if
+  ``abort_drive_v > max_drive_v`` and the controller is implemented
+  correctly, but is checked independently as defense in depth), the
+  environment immediately mutes its output and requests a global hardware
+  stop. There is no automatic resumption after an abort.
+* NOT implemented (limitation, see report): DAQ input overrange/clipping
+  detection and DAQ output fault detection are not implemented anywhere in
+  the existing Rattlesnake codebase (verified during analysis) and are not
+  added here, as doing so would require changes to the shared
+  acquisition/output layer well beyond this environment's scope.
+
+Rattlesnake Vibration Control Software
+Copyright (C) 2021  National Technology & Engineering Solutions of Sandia, LLC
+(NTESS). Under the terms of Contract DE-NA0003525 with NTESS, the U.S.
+Government retains certain rights in this software.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
+
+import copy
+import os
+import time
+import traceback
+import multiprocessing as mp
+from multiprocessing.queues import Queue
+
+import numpy as np
+import netCDF4 as nc4
+import openpyxl
+from qtpy import QtWidgets, uic
+
+from .abstract_environment import AbstractEnvironment, AbstractMetadata, AbstractUI
+from .utilities import DataAcquisitionParameters, VerboseMessageQueue, GlobalCommands
+from .ui_utilities import multiline_plotter
+from .environments import (ControlTypes, environment_definition_ui_paths,
+                           environment_run_ui_paths)
+from .sine_sweep_generator import SineSweepGenerator
+from .force_tracking_estimator import ForceTrackingEstimator
+from .force_amplitude_controller import ForceAmplitudeController, ControllerStatus
+from .force_target_specification import ConstantForceTarget
+
+control_type = ControlTypes.SINE_FORCE
+WAIT_TIME = 0.001
+MAX_PLOT_SAMPLES = 2000
+
+SWEEP_TYPE_UI_TO_INTERNAL = {'Linear': 'linear', 'Logarithmic': 'logarithmic'}
+SWEEP_TYPE_INTERNAL_TO_UI = {v: k for k, v in SWEEP_TYPE_UI_TO_INTERNAL.items()}
+DIRECTION_UI_TO_INTERNAL = {'Up': 'up', 'Down': 'down'}
+DIRECTION_INTERNAL_TO_UI = {v: k for k, v in DIRECTION_UI_TO_INTERNAL.items()}
+
+
+class SineForceControlQueues:
+    """Set of queues used by the Sine Force Control environment."""
+
+    def __init__(self,
+                 environment_command_queue: VerboseMessageQueue,
+                 gui_update_queue: mp.queues.Queue,
+                 controller_communication_queue: VerboseMessageQueue,
+                 data_in_queue: mp.queues.Queue,
+                 data_out_queue: mp.queues.Queue,
+                 log_file_queue: VerboseMessageQueue):
+        self.environment_command_queue = environment_command_queue
+        self.gui_update_queue = gui_update_queue
+        self.controller_communication_queue = controller_communication_queue
+        self.data_in_queue = data_in_queue
+        self.data_out_queue = data_out_queue
+        self.log_file_queue = log_file_queue
+
+
+class SineForceControlParameters(AbstractMetadata):
+    """Storage container for parameters used by the Sine Force Control environment."""
+
+    def __init__(self,
+                 sample_rate: float,
+                 output_sample_rate: float,
+                 sweep_type: str,
+                 f_start: float,
+                 f_stop: float,
+                 sweep_rate: float,
+                 direction: str,
+                 repeat: bool,
+                 force_channel_index: int,
+                 target_force: float,
+                 force_floor: float,
+                 tracking_bandwidth_hz: float,
+                 controller_alpha: float,
+                 control_update_period_s: float,
+                 initial_drive_v: float,
+                 max_drive_v: float,
+                 abort_drive_v: float,
+                 max_drive_step_v: float,
+                 ramp_time_s: float):
+        self.sample_rate = sample_rate
+        self.output_sample_rate = output_sample_rate
+        self.sweep_type = sweep_type
+        self.f_start = f_start
+        self.f_stop = f_stop
+        self.sweep_rate = sweep_rate
+        self.direction = direction
+        self.repeat = repeat
+        self.force_channel_index = force_channel_index
+        self.target_force = target_force
+        self.force_floor = force_floor
+        self.tracking_bandwidth_hz = tracking_bandwidth_hz
+        self.controller_alpha = controller_alpha
+        self.control_update_period_s = control_update_period_s
+        self.initial_drive_v = initial_drive_v
+        self.max_drive_v = max_drive_v
+        self.abort_drive_v = abort_drive_v
+        self.max_drive_step_v = max_drive_step_v
+        self.ramp_time_s = ramp_time_s
+
+    def store_to_netcdf(self, netcdf_group_handle: nc4._netCDF4.Group):
+        """Stores parameters and creates the diagnostic time-series variables."""
+        netcdf_group_handle.sweep_type = self.sweep_type
+        netcdf_group_handle.f_start = self.f_start
+        netcdf_group_handle.f_stop = self.f_stop
+        netcdf_group_handle.sweep_rate = self.sweep_rate
+        netcdf_group_handle.direction = self.direction
+        netcdf_group_handle.repeat = 1 if self.repeat else 0
+        netcdf_group_handle.force_channel_index = self.force_channel_index
+        netcdf_group_handle.target_force = self.target_force
+        netcdf_group_handle.force_unit = 'peak'
+        netcdf_group_handle.force_floor = self.force_floor
+        netcdf_group_handle.tracking_bandwidth_hz = self.tracking_bandwidth_hz
+        netcdf_group_handle.controller_alpha = self.controller_alpha
+        netcdf_group_handle.control_update_period_s = self.control_update_period_s
+        netcdf_group_handle.initial_drive_v = self.initial_drive_v
+        netcdf_group_handle.max_drive_v = self.max_drive_v
+        netcdf_group_handle.abort_drive_v = self.abort_drive_v
+        netcdf_group_handle.max_drive_step_v = self.max_drive_step_v
+        netcdf_group_handle.ramp_time_s = self.ramp_time_s
+        netcdf_group_handle.createDimension('control_updates', None)
+        netcdf_group_handle.createVariable('time', 'f8', ('control_updates',))
+        netcdf_group_handle.createVariable('instantaneous_frequency', 'f8', ('control_updates',))
+        netcdf_group_handle.createVariable('force_target', 'f8', ('control_updates',))
+        netcdf_group_handle.createVariable('force_amplitude_measured', 'f8', ('control_updates',))
+        netcdf_group_handle.createVariable('relative_force_error', 'f8', ('control_updates',))
+        netcdf_group_handle.createVariable('drive_amplitude_command', 'f8', ('control_updates',))
+        netcdf_group_handle.createVariable('controller_state', str, ('control_updates',))
+        netcdf_group_handle.createVariable('controller_saturated', 'i1', ('control_updates',))
+        netcdf_group_handle.createVariable('estimator_valid', 'i1', ('control_updates',))
+
+    @classmethod
+    def from_ui(cls, ui: 'SineForceControlUI') -> 'SineForceControlParameters':
+        widget = ui.definition_widget
+        sample_rate = ui.data_acquisition_parameters.sample_rate
+        output_sample_rate = sample_rate * ui.data_acquisition_parameters.output_oversample
+        return cls(
+            sample_rate=sample_rate,
+            output_sample_rate=output_sample_rate,
+            sweep_type=SWEEP_TYPE_UI_TO_INTERNAL[widget.sweep_type_selector.currentText()],
+            f_start=widget.start_frequency_selector.value(),
+            f_stop=widget.stop_frequency_selector.value(),
+            sweep_rate=widget.sweep_rate_selector.value(),
+            direction=DIRECTION_UI_TO_INTERNAL[widget.direction_selector.currentText()],
+            repeat=widget.repeat_sweep_checkbox.isChecked(),
+            force_channel_index=widget.force_channel_selector.currentData(),
+            target_force=widget.target_force_selector.value(),
+            force_floor=widget.force_floor_selector.value(),
+            tracking_bandwidth_hz=widget.tracking_bandwidth_selector.value(),
+            controller_alpha=widget.controller_alpha_selector.value(),
+            control_update_period_s=widget.control_update_period_selector.value(),
+            initial_drive_v=widget.initial_drive_selector.value(),
+            max_drive_v=widget.max_drive_selector.value(),
+            abort_drive_v=widget.abort_drive_selector.value(),
+            max_drive_step_v=widget.max_drive_step_selector.value(),
+            ramp_time_s=widget.ramp_time_selector.value(),
+        )
+
+
+class SineForceControlUI(AbstractUI):
+    """User interface for the Sine Force Control environment."""
+
+    def __init__(self,
+                 environment_name: str,
+                 definition_tabwidget: QtWidgets.QTabWidget,
+                 system_id_tabwidget: QtWidgets.QTabWidget,
+                 test_predictions_tabwidget: QtWidgets.QTabWidget,
+                 run_tabwidget: QtWidgets.QTabWidget,
+                 environment_command_queue: VerboseMessageQueue,
+                 controller_communication_queue: VerboseMessageQueue,
+                 log_file_queue: Queue):
+        super().__init__(environment_name,
+                          environment_command_queue, controller_communication_queue,
+                          log_file_queue)
+        self.definition_widget = QtWidgets.QWidget()
+        uic.loadUi(environment_definition_ui_paths[control_type], self.definition_widget)
+        definition_tabwidget.addTab(self.definition_widget, self.environment_name)
+        self.run_widget = QtWidgets.QWidget()
+        uic.loadUi(environment_run_ui_paths[control_type], self.run_widget)
+        run_tabwidget.addTab(self.run_widget, self.environment_name)
+
+        self.data_acquisition_parameters = None
+        self.environment_parameters = None
+        self.netcdf_handle = None
+        self.acquiring = False
+        self.plot_data_items = {}
+        self._force_plot_time = np.array([])
+        self._force_plot_measured = np.array([])
+        self._force_plot_target = np.array([])
+
+        self.complete_ui()
+        self.connect_callbacks()
+
+    def complete_ui(self):
+        self.definition_widget.sweep_type_selector.addItems(['Linear', 'Logarithmic'])
+        self.definition_widget.direction_selector.addItems(['Up', 'Down'])
+        self.definition_widget.sweep_type_selector.currentTextChanged.connect(
+            self.update_sweep_rate_units)
+        self.update_sweep_rate_units(self.definition_widget.sweep_type_selector.currentText())
+        plot_item = self.run_widget.force_plot.getPlotItem()
+        plot_item.showGrid(True, True, 0.25)
+        plot_item.enableAutoRange()
+        plot_item.getViewBox().enableAutoRange(enable=True)
+        self.plot_data_items['force'] = multiline_plotter(
+            np.arange(2), np.zeros((2, 2)), widget=self.run_widget.force_plot,
+            other_pen_options={'width': 1}, names=['Measured Force', 'Target Force'])
+
+    def connect_callbacks(self):
+        self.definition_widget.select_file_button.clicked.connect(self.select_file)
+        self.run_widget.start_test_button.clicked.connect(self.start_control)
+        self.run_widget.stop_test_button.clicked.connect(self.stop_control)
+
+    def update_sweep_rate_units(self, sweep_type_text: str):
+        if sweep_type_text == 'Linear':
+            self.definition_widget.sweep_rate_selector.setSuffix(' Hz/s')
+        else:
+            self.definition_widget.sweep_rate_selector.setSuffix(' oct/min')
+
+    def select_file(self):
+        filename, file_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self.definition_widget, 'Select NetCDF File to Save Sine Force Control Data',
+            filter='NetCDF File (*.nc4)')
+        if filename == '':
+            return
+        self.definition_widget.data_file_selector.setText(filename)
+
+    def initialize_data_acquisition(self, data_acquisition_parameters: DataAcquisitionParameters):
+        self.log('Initializing Data Acquisition')
+        self.data_acquisition_parameters = data_acquisition_parameters
+        channels = data_acquisition_parameters.channel_list
+        self.definition_widget.force_channel_selector.clear()
+        for index, channel in enumerate(channels):
+            if channel.feedback_device is None:
+                name = '{:} {:}{:}'.format(
+                    '' if channel.channel_type is None else channel.channel_type,
+                    channel.node_number, channel.node_direction)
+                self.definition_widget.force_channel_selector.addItem(name, index)
+        self.definition_widget.sample_rate_display.setValue(data_acquisition_parameters.sample_rate)
+        self.definition_widget.stop_frequency_selector.setMaximum(
+            data_acquisition_parameters.sample_rate / 2)
+        self.definition_widget.start_frequency_selector.setMaximum(
+            data_acquisition_parameters.sample_rate / 2)
+
+    def collect_environment_definition_parameters(self) -> SineForceControlParameters:
+        return SineForceControlParameters.from_ui(self)
+
+    def initialize_environment(self) -> AbstractMetadata:
+        self.log('Initializing Environment Parameters')
+        data = self.collect_environment_definition_parameters()
+        if data.force_channel_index is None:
+            raise ValueError('No force control channel selected!')
+        if data.f_start <= 0 or data.f_stop <= 0:
+            raise ValueError('Start/Stop frequency must be positive!')
+        if data.max_drive_v >= data.abort_drive_v:
+            raise ValueError('Abort Drive Limit must be greater than Max Drive (control limit)!')
+        if data.initial_drive_v <= 0:
+            raise ValueError('Initial Drive must be a small positive value '
+                              '(a pure multiplicative controller cannot move '
+                              'away from a zero starting amplitude).')
+        self.environment_parameters = data
+        return data
+
+    def retrieve_metadata(self, netcdf_handle: nc4._netCDF4.Dataset):
+        group = netcdf_handle.groups[self.environment_name]
+        self.definition_widget.sweep_type_selector.setCurrentText(
+            SWEEP_TYPE_INTERNAL_TO_UI[group.sweep_type])
+        self.definition_widget.start_frequency_selector.setValue(group.f_start)
+        self.definition_widget.stop_frequency_selector.setValue(group.f_stop)
+        self.definition_widget.sweep_rate_selector.setValue(group.sweep_rate)
+        self.definition_widget.direction_selector.setCurrentText(
+            DIRECTION_INTERNAL_TO_UI[group.direction])
+        self.definition_widget.repeat_sweep_checkbox.setChecked(bool(group.repeat))
+        index = self.definition_widget.force_channel_selector.findData(int(group.force_channel_index))
+        if index >= 0:
+            self.definition_widget.force_channel_selector.setCurrentIndex(index)
+        self.definition_widget.target_force_selector.setValue(group.target_force)
+        self.definition_widget.force_floor_selector.setValue(group.force_floor)
+        self.definition_widget.tracking_bandwidth_selector.setValue(group.tracking_bandwidth_hz)
+        self.definition_widget.controller_alpha_selector.setValue(group.controller_alpha)
+        self.definition_widget.control_update_period_selector.setValue(group.control_update_period_s)
+        self.definition_widget.initial_drive_selector.setValue(group.initial_drive_v)
+        self.definition_widget.max_drive_selector.setValue(group.max_drive_v)
+        self.definition_widget.abort_drive_selector.setValue(group.abort_drive_v)
+        self.definition_widget.max_drive_step_selector.setValue(group.max_drive_step_v)
+        self.definition_widget.ramp_time_selector.setValue(group.ramp_time_s)
+
+    def create_netcdf_file(self, filename):
+        self.netcdf_handle = nc4.Dataset(filename, 'w', format='NETCDF4', clobber=True)
+        group_handle = self.netcdf_handle.createGroup(self.environment_name)
+        self.environment_parameters.store_to_netcdf(group_handle)
+
+    def start_control(self):
+        filename = self.definition_widget.data_file_selector.text()
+        if filename == '':
+            QtWidgets.QMessageBox.critical(
+                self.definition_widget, 'Invalid File',
+                'Please select a file in which to store Sine Force Control diagnostics')
+            return
+        if self.definition_widget.autoincrement_checkbox.isChecked():
+            path, ext = os.path.splitext(filename)
+            from glob import glob
+            index = len(glob(path + '*' + ext))
+            filename = '{:}_{:04d}{:}'.format(path, index, ext)
+        self.create_netcdf_file(filename)
+        self.acquiring = True
+        self.run_widget.start_test_button.setEnabled(False)
+        self.run_widget.stop_test_button.setEnabled(True)
+        self.controller_communication_queue.put(
+            self.log_name, (GlobalCommands.START_ENVIRONMENT, self.environment_name))
+        self.environment_command_queue.put(
+            self.log_name, (GlobalCommands.START_ENVIRONMENT, None))
+        self.controller_communication_queue.put(
+            self.log_name, (GlobalCommands.AT_TARGET_LEVEL, self.environment_name))
+
+    def stop_control(self):
+        self.environment_command_queue.put(self.log_name, (GlobalCommands.STOP_ENVIRONMENT, None))
+
+    def update_gui(self, queue_data):
+        message, data = queue_data
+        if message == 'diagnostic_update':
+            (t, frequency, target, measured, relative_error, drive_amplitude,
+             state, saturated, valid) = data
+            self.run_widget.frequency_display.setValue(frequency)
+            self.run_widget.drive_amplitude_display.setValue(drive_amplitude)
+            self.run_widget.state_display.setText(state)
+            self.run_widget.saturated_checkbox.setChecked(bool(saturated))
+            self.run_widget.estimator_valid_checkbox.setChecked(bool(valid))
+            if valid:
+                self.run_widget.measured_force_display.setValue(measured)
+                self.run_widget.relative_error_display.setValue(relative_error * 100.0)
+                self._force_plot_time = np.append(self._force_plot_time, t)[-MAX_PLOT_SAMPLES:]
+                self._force_plot_measured = np.append(self._force_plot_measured, measured)[-MAX_PLOT_SAMPLES:]
+                self._force_plot_target = np.append(self._force_plot_target, target)[-MAX_PLOT_SAMPLES:]
+                self.plot_data_items['force'][0].setData(self._force_plot_time, self._force_plot_measured)
+                self.plot_data_items['force'][1].setData(self._force_plot_time, self._force_plot_target)
+            if self.acquiring and self.netcdf_handle is not None:
+                group = self.netcdf_handle.groups[self.environment_name]
+                i = group.dimensions['control_updates'].size
+                group.variables['time'][i] = t
+                group.variables['instantaneous_frequency'][i] = frequency
+                group.variables['force_target'][i] = target
+                group.variables['force_amplitude_measured'][i] = measured if valid else np.nan
+                group.variables['relative_force_error'][i] = relative_error if valid else np.nan
+                group.variables['drive_amplitude_command'][i] = drive_amplitude
+                group.variables['controller_state'][i] = state
+                group.variables['controller_saturated'][i] = 1 if saturated else 0
+                group.variables['estimator_valid'][i] = 1 if valid else 0
+        elif message == 'aborted':
+            self.acquiring = False
+            self.run_widget.state_display.setText('ABORTED: {:}'.format(data))
+            self.run_widget.start_test_button.setEnabled(True)
+            self.run_widget.stop_test_button.setEnabled(False)
+            QtWidgets.QMessageBox.critical(
+                self.run_widget, 'Sine Force Control Aborted', str(data))
+        elif message == 'finished':
+            self.acquiring = False
+            self.run_widget.start_test_button.setEnabled(True)
+            self.run_widget.stop_test_button.setEnabled(False)
+            if self.netcdf_handle is not None:
+                self.netcdf_handle.close()
+                self.netcdf_handle = None
+
+    @staticmethod
+    def create_environment_template(environment_name: str, workbook: openpyxl.workbook.workbook.Workbook):
+        worksheet = workbook.create_sheet(environment_name)
+        worksheet.cell(1, 1, 'Control Type')
+        worksheet.cell(1, 2, 'Sine Force Control')
+        rows = [
+            ('Sweep Type', 'Linear or Logarithmic'),
+            ('Start Frequency', 'Hz'),
+            ('Stop Frequency', 'Hz'),
+            ('Sweep Rate', 'Hz/s (linear) or octaves/min (logarithmic)'),
+            ('Direction', 'Up or Down'),
+            ('Repeat', '0 or 1'),
+            ('Force Channel Index', '0-based index into the channel table'),
+            ('Target Force', 'N peak'),
+            ('Force Floor', 'N peak'),
+            ('Tracking Bandwidth', 'Hz'),
+            ('Controller Alpha', '0 < alpha <= 1'),
+            ('Control Update Period', 's'),
+            ('Initial Drive', 'V peak'),
+            ('Max Drive', 'V peak (control limit)'),
+            ('Abort Drive', 'V peak (safety limit)'),
+            ('Max Drive Step', 'V peak per update'),
+            ('Ramp Time', 's'),
+        ]
+        for i, (label, note) in enumerate(rows, start=2):
+            worksheet.cell(i, 1, label)
+            worksheet.cell(i, 2, '#')
+            worksheet.cell(i, 4, 'Note: ' + note)
+
+    def set_parameters_from_template(self, worksheet: openpyxl.worksheet.worksheet.Worksheet):
+        self.definition_widget.sweep_type_selector.setCurrentText(str(worksheet.cell(2, 2).value))
+        self.definition_widget.start_frequency_selector.setValue(float(worksheet.cell(3, 2).value))
+        self.definition_widget.stop_frequency_selector.setValue(float(worksheet.cell(4, 2).value))
+        self.definition_widget.sweep_rate_selector.setValue(float(worksheet.cell(5, 2).value))
+        self.definition_widget.direction_selector.setCurrentText(str(worksheet.cell(6, 2).value))
+        self.definition_widget.repeat_sweep_checkbox.setChecked(bool(int(worksheet.cell(7, 2).value)))
+        index = self.definition_widget.force_channel_selector.findData(int(worksheet.cell(8, 2).value))
+        if index >= 0:
+            self.definition_widget.force_channel_selector.setCurrentIndex(index)
+        self.definition_widget.target_force_selector.setValue(float(worksheet.cell(9, 2).value))
+        self.definition_widget.force_floor_selector.setValue(float(worksheet.cell(10, 2).value))
+        self.definition_widget.tracking_bandwidth_selector.setValue(float(worksheet.cell(11, 2).value))
+        self.definition_widget.controller_alpha_selector.setValue(float(worksheet.cell(12, 2).value))
+        self.definition_widget.control_update_period_selector.setValue(float(worksheet.cell(13, 2).value))
+        self.definition_widget.initial_drive_selector.setValue(float(worksheet.cell(14, 2).value))
+        self.definition_widget.max_drive_selector.setValue(float(worksheet.cell(15, 2).value))
+        self.definition_widget.abort_drive_selector.setValue(float(worksheet.cell(16, 2).value))
+        self.definition_widget.max_drive_step_selector.setValue(float(worksheet.cell(17, 2).value))
+        self.definition_widget.ramp_time_selector.setValue(float(worksheet.cell(18, 2).value))
+
+
+class SineForceControlEnvironment(AbstractEnvironment):
+    """Environment implementing the closed-loop force-controlled sine sweep."""
+
+    def __init__(self,
+                 environment_name: str,
+                 queue_container: SineForceControlQueues,
+                 acquisition_active: mp.Value,
+                 output_active: mp.Value):
+        super().__init__(
+            environment_name,
+            queue_container.environment_command_queue,
+            queue_container.gui_update_queue,
+            queue_container.controller_communication_queue,
+            queue_container.log_file_queue,
+            queue_container.data_in_queue,
+            queue_container.data_out_queue,
+            acquisition_active,
+            output_active)
+        self.queue_container = queue_container
+        self.command_map[GlobalCommands.START_ENVIRONMENT] = self.run_environment
+
+        self.data_acquisition_parameters = None
+        self.environment_parameters = None
+        self.measurement_channels = None
+        self.output_channels = None
+        self.force_channel_local_index = None
+
+        self.startup = True
+        self.aborted = False
+        self.state = 'INIT'  # INIT -> RAMPING -> ACTIVE -> STOPPING -> (finished)
+        self.output_gate = 0.0
+        self.output_gate_target = 0.0
+        self.output_gate_change = 0.0
+        self.samples_since_control_update = 0
+        self.control_update_samples = None
+        self.elapsed_time = 0.0
+
+        self.output_sweep_generator = None
+        self.input_phase_generator = None
+        self.estimator = None
+        self.controller = None
+        self.target_spec = None
+        self.last_frequency = None
+        self.last_result = None
+        self._last_status = ControllerStatus.OK
+
+    def initialize_data_acquisition_parameters(self, data_acquisition_parameters: DataAcquisitionParameters):
+        self.log('Initializing Data Acquisition Parameters')
+        self.data_acquisition_parameters = data_acquisition_parameters
+        self.measurement_channels = [
+            index for index, channel in enumerate(data_acquisition_parameters.channel_list)
+            if channel.feedback_device is None]
+        self.output_channels = [
+            index for index, channel in enumerate(data_acquisition_parameters.channel_list)
+            if not channel.feedback_device is None]
+
+    def initialize_environment_test_parameters(self, environment_parameters: SineForceControlParameters):
+        self.log('Initializing Environment Parameters')
+        self.environment_parameters = environment_parameters
+        self.force_channel_local_index = self.measurement_channels.index(
+            environment_parameters.force_channel_index)
+
+        self.output_sweep_generator = SineSweepGenerator(
+            sample_rate=environment_parameters.output_sample_rate,
+            sweep_type=environment_parameters.sweep_type,
+            f_start=environment_parameters.f_start,
+            f_stop=environment_parameters.f_stop,
+            sweep_rate=environment_parameters.sweep_rate,
+            direction=environment_parameters.direction,
+            repeat=environment_parameters.repeat)
+        self.input_phase_generator = SineSweepGenerator(
+            sample_rate=environment_parameters.sample_rate,
+            sweep_type=environment_parameters.sweep_type,
+            f_start=environment_parameters.f_start,
+            f_stop=environment_parameters.f_stop,
+            sweep_rate=environment_parameters.sweep_rate,
+            direction=environment_parameters.direction,
+            repeat=environment_parameters.repeat)
+        self.estimator = ForceTrackingEstimator(
+            sample_rate=environment_parameters.sample_rate,
+            tracking_bandwidth_hz=environment_parameters.tracking_bandwidth_hz)
+        self.controller = ForceAmplitudeController(
+            alpha=environment_parameters.controller_alpha,
+            force_floor=environment_parameters.force_floor,
+            max_drive_amplitude=environment_parameters.max_drive_v,
+            max_amplitude_step=environment_parameters.max_drive_step_v,
+            initial_drive_amplitude=environment_parameters.initial_drive_v)
+        self.target_spec = ConstantForceTarget(environment_parameters.target_force, force_unit='peak')
+
+        self.control_update_samples = max(1, round(
+            environment_parameters.control_update_period_s * environment_parameters.sample_rate))
+        self.samples_since_control_update = 0
+        self.elapsed_time = 0.0
+        self.output_gate = 0.0
+        self.output_gate_target = 0.0
+        self.output_gate_change = 0.0
+        self.state = 'INIT'
+        self.aborted = False
+        self.last_frequency = environment_parameters.f_start
+        self.last_result = None
+        self._last_status = ControllerStatus.OK
+
+    def _publish_diagnostics(self, frequency):
+        valid = self.last_result.valid if self.last_result is not None else False
+        measured = self.last_result.amplitude if (self.last_result is not None and valid) else float('nan')
+        saturated = self._last_status is ControllerStatus.SATURATED
+        target = self.target_spec.evaluate(frequency)
+        relative_error = ((measured - target) / target) if valid else float('nan')
+        state_str = '{:}/{:}'.format(self.state, self._last_status.value)
+        self.queue_container.gui_update_queue.put((self.environment_name, (
+            'diagnostic_update',
+            (self.elapsed_time, frequency, target, measured, relative_error,
+             self.controller.drive_amplitude, state_str, saturated, valid))))
+
+    def _trigger_abort(self, reason: str):
+        self.log('SAFETY ABORT: {:}'.format(reason))
+        self.aborted = True
+        self.state = 'ABORTED'
+        self.output_gate = 0.0
+        self.output_gate_target = 0.0
+        self.output_gate_change = 0.0
+        # Immediately mute this environment's output.
+        try:
+            silence = np.zeros((len(self.output_channels), self.data_acquisition_parameters.samples_per_write))
+            self.queue_container.data_out_queue.put((silence, True))
+        except Exception:
+            pass
+        # Request the existing global hardware-stop mechanism -- no
+        # environment-specific abort path is invented here.
+        self.controller_communication_queue.put(self.log_name, (GlobalCommands.STOP_HARDWARE, None))
+        self.queue_container.gui_update_queue.put((self.environment_name, ('aborted', reason)))
+
+    def run_environment(self, data):
+        if self.aborted:
+            return  # Latched -- no automatic resumption.
+        try:
+            self._run_environment_step()
+        except Exception:
+            self._trigger_abort('Unhandled exception in control loop:\n' + traceback.format_exc())
+
+    def _run_environment_step(self):
+        if self.startup:
+            self.startup = False
+            self.state = 'RAMPING'
+            self.output_gate_target = 1.0
+            ramp_samples = max(1, int(self.environment_parameters.ramp_time_s
+                                       * self.environment_parameters.output_sample_rate))
+            self.output_gate_change = 1.0 / ramp_samples
+
+        # Consume the newest available acquisition block, if any.
+        try:
+            acquisition_data, last_acquisition = self.queue_container.data_in_queue.get_nowait()
+        except mp.queues.Empty:
+            acquisition_data = None
+            last_acquisition = False
+
+        if acquisition_data is not None:
+            force_samples = np.asarray(acquisition_data[self.force_channel_local_index], dtype=float)
+            n = force_samples.shape[-1]
+            _, freq_in, phase_in = self.input_phase_generator.generate_block(n, drive_amplitude=1.0)
+            self.last_result = self.estimator.process_block(force_samples, phase_in)
+            self.last_frequency = float(freq_in[-1])
+            self.elapsed_time += n / self.environment_parameters.sample_rate
+
+            self.samples_since_control_update += n
+            if (self.state == 'ACTIVE'
+                    and self.samples_since_control_update >= self.control_update_samples):
+                self.samples_since_control_update -= self.control_update_samples
+                target = self.target_spec.evaluate(self.last_frequency)
+                measured = self.last_result.amplitude if self.last_result.valid else None
+                ctrl_result = self.controller.update(target, measured, self.last_result.valid)
+                self._last_status = ctrl_result.status
+                if self.controller.drive_amplitude > self.environment_parameters.abort_drive_v:
+                    self._trigger_abort(
+                        'Commanded drive amplitude {:.4f} V exceeded abort limit {:.4f} V'.format(
+                            self.controller.drive_amplitude, self.environment_parameters.abort_drive_v))
+                    return
+            self._publish_diagnostics(self.last_frequency)
+
+        # Generate and send the next output block if the output task is ready for one.
+        if self.queue_container.data_out_queue.empty():
+            n_out = self.data_acquisition_parameters.samples_per_write
+            samples, freq_out, phase_out = self.output_sweep_generator.generate_block(
+                n_out, drive_amplitude=self.controller.drive_amplitude)
+
+            gate = self._advance_gate(n_out)
+            output_block = samples * gate
+            full_output = np.zeros((len(self.output_channels), n_out))
+            # Single-output-channel drive: broadcast to all configured output
+            # channels driving the shaker (matches the common single-shaker
+            # setup this environment targets; a MIMO extension is future work).
+            full_output[:, :] = output_block
+
+            last_signal = (self.state == 'STOPPING' and self.output_gate <= 0.0
+                            and self.output_gate_target == 0.0)
+            self.queue_container.data_out_queue.put((copy.deepcopy(full_output), last_signal))
+
+            if self.state == 'RAMPING' and self.output_gate >= 1.0:
+                self.state = 'ACTIVE'
+            if last_signal:
+                while not last_acquisition:
+                    self.log('Waiting for Last Acquisition')
+                    try:
+                        acquisition_data, last_acquisition = self.queue_container.data_in_queue.get(timeout=1.0)
+                    except mp.queues.Empty:
+                        break
+                self.shutdown()
+                return
+
+        self.queue_container.environment_command_queue.put(
+            self.environment_name, (GlobalCommands.START_ENVIRONMENT, None))
+
+    def _advance_gate(self, n_samples: int) -> np.ndarray:
+        """Advances the startup/shutdown ramp gate by n_samples and returns
+        the per-sample gate value (0..1) to multiply onto the output."""
+        if self.output_gate_change == 0.0:
+            return np.full(n_samples, self.output_gate)
+        gate = self.output_gate + (np.arange(n_samples) + 1) * self.output_gate_change
+        reached = np.nonzero(
+            np.abs(gate - self.output_gate_target) < abs(self.output_gate_change))[0]
+        if len(reached) > 0:
+            gate[reached[0] + 1:] = self.output_gate_target
+            self.output_gate = self.output_gate_target
+            self.output_gate_change = 0.0
+        else:
+            self.output_gate = gate[-1]
+        return np.clip(gate, 0.0, 1.0)
+
+    def stop_environment(self, data):
+        """Ramps the drive amplitude gate down to zero and stops (normal, non-abort stop)."""
+        if self.aborted:
+            return
+        self.state = 'STOPPING'
+        self.output_gate_target = 0.0
+        ramp_samples = max(1, int(self.environment_parameters.ramp_time_s
+                                   * self.environment_parameters.output_sample_rate))
+        self.output_gate_change = -1.0 / ramp_samples
+
+    def shutdown(self):
+        self.log('Shutting Down Sine Force Control')
+        self.queue_container.environment_command_queue.flush(self.environment_name)
+        self.queue_container.gui_update_queue.put((self.environment_name, ('finished', None)))
+        self.startup = True
+
+
+def sine_force_control_process(environment_name: str,
+                               input_queue: VerboseMessageQueue,
+                               gui_update_queue: Queue,
+                               controller_communication_queue: VerboseMessageQueue,
+                               log_file_queue: Queue,
+                               data_in_queue: Queue,
+                               data_out_queue: Queue,
+                               acquisition_active: mp.Value,
+                               output_active: mp.Value):
+    """Sine Force Control environment process function called by multiprocessing.
+
+    Creates a SineForceControlEnvironment object and runs it. Mirrors the
+    structure of ``time_environment.time_process``.
+    """
+    queue_container = SineForceControlQueues(input_queue,
+                                             gui_update_queue,
+                                             controller_communication_queue,
+                                             data_in_queue,
+                                             data_out_queue,
+                                             log_file_queue)
+    process_class = SineForceControlEnvironment(
+        environment_name,
+        queue_container,
+        acquisition_active,
+        output_active)
+    process_class.run()
