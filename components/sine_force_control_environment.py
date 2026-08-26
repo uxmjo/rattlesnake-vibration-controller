@@ -277,7 +277,7 @@ class SineForceControlUI(AbstractUI):
             other_pen_options={'width': 1}, names=['Measured Force', 'Target Force'])
 
     def connect_callbacks(self):
-        self.definition_widget.select_file_button.clicked.connect(self.select_file)
+        self.run_widget.select_file_button.clicked.connect(self.select_file)
         self.run_widget.start_test_button.clicked.connect(self.start_control)
         self.run_widget.stop_test_button.clicked.connect(self.stop_control)
 
@@ -289,11 +289,11 @@ class SineForceControlUI(AbstractUI):
 
     def select_file(self):
         filename, file_filter = QtWidgets.QFileDialog.getSaveFileName(
-            self.definition_widget, 'Select NetCDF File to Save Sine Force Control Data',
+            self.run_widget, 'Select NetCDF File to Save Sine Force Control Data',
             filter='NetCDF File (*.nc4)')
         if filename == '':
             return
-        self.definition_widget.data_file_selector.setText(filename)
+        self.run_widget.data_file_selector.setText(filename)
 
     def initialize_data_acquisition(self, data_acquisition_parameters: DataAcquisitionParameters):
         self.log('Initializing Data Acquisition')
@@ -361,13 +361,13 @@ class SineForceControlUI(AbstractUI):
         self.environment_parameters.store_to_netcdf(group_handle)
 
     def start_control(self):
-        filename = self.definition_widget.data_file_selector.text()
+        filename = self.run_widget.data_file_selector.text()
         if filename == '':
             QtWidgets.QMessageBox.critical(
-                self.definition_widget, 'Invalid File',
+                self.run_widget, 'Invalid File',
                 'Please select a file in which to store Sine Force Control diagnostics')
             return
-        if self.definition_widget.autoincrement_checkbox.isChecked():
+        if self.run_widget.autoincrement_checkbox.isChecked():
             path, ext = os.path.splitext(filename)
             from glob import glob
             index = len(glob(path + '*' + ext))

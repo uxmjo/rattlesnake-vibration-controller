@@ -17,6 +17,45 @@
    <item>
     <layout class="QVBoxLayout" name="environment_control_layout">
      <item>
+      <widget class="QGroupBox" name="logging_groupbox">
+       <property name="title">
+        <string>Diagnostics Logging</string>
+       </property>
+       <layout class="QVBoxLayout" name="logging_layout">
+        <item>
+         <widget class="QLineEdit" name="data_file_selector">
+          <property name="toolTip">
+           <string>NetCDF file in which controller diagnostics (frequency, target/measured force, drive amplitude, status) will be logged. Must be set before Start Environment is enabled.</string>
+          </property>
+          <property name="readOnly">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="select_file_button">
+          <property name="text">
+           <string>Select File</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="autoincrement_checkbox">
+          <property name="toolTip">
+           <string>Automatically append an incrementing index to the file name to avoid overwriting previous data.</string>
+          </property>
+          <property name="text">
+           <string>Autoincrement</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item>
       <widget class="QGroupBox" name="environment_control_groupbox">
        <property name="sizePolicy">
         <sizepolicy hsizetype="Minimum" vsizetype="Minimum">
