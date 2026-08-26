@@ -1188,6 +1188,12 @@ class ModalUI(AbstractUI):
         group_handle.createVariable('frf_data_real','f8',('fft_lines','response_channels','reference_channels'))
         group_handle.createVariable('frf_data_imag','f8',('fft_lines','response_channels','reference_channels'))
         group_handle.createVariable('coherence','f8',('fft_lines','response_channels'))
+        if self.environment_parameters.control_enabled:
+            group_handle.createDimension('control_frames',None)
+            group_handle.createVariable('control_frame_number','i4',('control_frames',))
+            group_handle.createVariable('control_target_amplitude','f8',('control_frames',))
+            group_handle.createVariable('control_measured_amplitude','f8',('control_frames',))
+            group_handle.createVariable('control_level','f8',('control_frames',))
         
     def collect_environment_definition_parameters(self) -> AbstractMetadata:
         """
@@ -1500,6 +1506,14 @@ class ModalUI(AbstractUI):
             (frames,target_amplitude,measured_amplitude,new_level) = data
             self.run_widget.control_measured_amplitude_display.setValue(measured_amplitude)
             self.run_widget.control_current_level_display.setValue(new_level)
+            if self.acquiring and not self.netcdf_handle is None:
+                group = self.netcdf_handle.groups[self.environment_name]
+                if 'control_frames' in group.dimensions:
+                    index = group.dimensions['control_frames'].size
+                    group.variables['control_frame_number'][index] = frames
+                    group.variables['control_target_amplitude'][index] = target_amplitude
+                    group.variables['control_measured_amplitude'][index] = measured_amplitude
+                    group.variables['control_level'][index] = new_level
         elif message == 'time_frame':
             frame,accepted = data
             self.run_widget.channel_display_area.last_frame = frame
