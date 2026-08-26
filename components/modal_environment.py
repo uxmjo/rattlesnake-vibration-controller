@@ -1496,7 +1496,8 @@ class ModalUI(AbstractUI):
                 group.variables['frf_data_real'][:] = np.real(self.last_frf)
                 group.variables['frf_data_imag'][:] = np.imag(self.last_frf)
                 group.variables['coherence'][:] = self.last_coherence
-            if self.acquiring and frames >= self.environment_parameters.num_averages:
+            if (self.acquiring and frames >= self.environment_parameters.num_averages
+                    and not self.environment_parameters.control_enabled):
                 # print('Stopping Control')
                 self.stop_control()
                 self.acquiring = False
