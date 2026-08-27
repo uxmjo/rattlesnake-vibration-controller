@@ -328,6 +328,27 @@ class SineForceControlUI(AbstractUI):
             raise ValueError('Initial Drive must be a small positive value '
                               '(a pure multiplicative controller cannot move '
                               'away from a zero starting amplitude).')
+        # Warn (but don't block) if the control loop updates faster than the
+        # tracking filter can settle -- the controller would then react to a
+        # not-yet-settled amplitude estimate, causing the drive/force
+        # amplitude to oscillate around the target instead of converging.
+        # 5.0 here must match ForceTrackingEstimator's default
+        # valid_settle_time_constants (see force_tracking_estimator.py).
+        settle_time_s = 5.0 / (2 * np.pi * data.tracking_bandwidth_hz)
+        if data.control_update_period_s < settle_time_s:
+            QtWidgets.QMessageBox.warning(
+                self.definition_widget, 'Control Update Period May Be Too Short',
+                'Control Update Period ({:.4f} s) is shorter than the tracking '
+                'filter\'s settle time (~{:.4f} s at {:.2f} Hz bandwidth).\n\n'
+                'The controller may react to a not-yet-settled amplitude estimate, '
+                'causing the drive/force amplitude to oscillate around the target '
+                'instead of converging.\n\n'
+                'Consider increasing Control Update Period to at least {:.4f} s '
+                '(with some margin), and/or increasing Tracking Bandwidth, and/or '
+                'reducing Controller Alpha for a more damped response.\n\n'
+                'You can still proceed with the current values.'.format(
+                    data.control_update_period_s, settle_time_s,
+                    data.tracking_bandwidth_hz, settle_time_s))
         self.environment_parameters = data
         return data
 
