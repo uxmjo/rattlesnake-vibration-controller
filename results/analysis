@@ -1,0 +1,61 @@
+from netCDF4 import Dataset
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+filename = "C:/Users/apadmin/Documents/Andrea/Shakerversuche/test_force_control_20260826.nc4"
+
+with Dataset(filename, "r") as nc:
+    # print structure of the data file
+    print("\nDimensionen:")
+    for name, dim in nc.dimensions.items():
+        print(f"  {name}: {len(dim)}")
+
+    print("\nVariablen:")
+    for name, var in nc.variables.items():
+        print(f"  {name}: shape={var.shape}, dimensions={var.dimensions}, dtype={var.dtype}")
+
+    # sample rate and time data
+    fs = nc.sample_rate
+    data = np.asarray(nc.variables["time_data"][:])
+
+print(f"Sampling rate: {fs} Hz")
+print(f"Anzahl Kanäle: {data.shape[0]}")
+print(f"Anzahl Samples: {data.shape[1]}")
+print(f"Messdauer: {data.shape[1] / fs:.2f} s")
+
+# Zeitachse erzeugen
+time = np.arange(data.shape[1]) / fs
+
+# Plot
+fig, axes = plt.subplots(data.shape[0], 1,
+                         figsize=(14, 10),
+                         sharex=True)
+
+for i, ax in enumerate(axes):
+    ax.plot(time, data[i], linewidth=0.5)
+    ax.set_ylabel(f"Kanal {i + 1}")
+    ax.grid(True, alpha=0.3)
+
+axes[-1].set_xlabel("Zeit [s]")
+
+plt.tight_layout()
+plt.show()
+"""
+
+d = Dataset(filename)
+print(d.variables["environment_names"][0])
+g = d.groups['Modal']   # Name des Modal-Environments
+frame = g.variables['control_frame_number'][:]
+target = g.variables['control_target_amplitude'][:]
+measured = g.variables['control_measured_amplitude'][:]
+level = g.variables['control_level'][:]
+
+fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
+ax1.plot(frame, target, label='target')
+ax1.plot(frame, measured, label='measured')
+ax1.legend(); ax1.set_ylabel('Force Amplitude')
+ax2.plot(frame, level, label='level')
+ax2.set_ylabel('Signal Generator Level'); ax2.set_xlabel('Frame')
+plt.show()
+"""

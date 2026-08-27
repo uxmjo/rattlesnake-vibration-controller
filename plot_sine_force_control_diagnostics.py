@@ -106,14 +106,19 @@ def plot_diagnostics(data, metadata, group_name):
 
 
 if __name__ == '__main__':
+<<<<<<< HEAD
+    """
+=======
     print('DEBUG sys.argv:', sys.argv)
+>>>>>>> 09147f310b4f07b0e2e59c5db122fac958f984b5
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('filename', help='Path to the .nc4 diagnostics file')
     parser.add_argument('--group', default=None,
                         help='Environment group name (default: first group in the file)')
     args = parser.parse_args()
+    """
 
-    data, metadata, group_name = load_diagnostics(args.filename, args.group)
+    data, metadata, group_name = load_diagnostics("C:/Users/apadmin/Documents/Andrea/Shakerversuche/test_force_control_new_environment_20260826_diagnostics_0000.nc4")#args.filename, args.group)
     print('Loaded {:} samples from group "{:}"'.format(len(data['time']), group_name))
     print('Sweep: {:} from {:.2f} to {:.2f} Hz, target force {:.3f} N peak'.format(
         metadata['sweep_type'], metadata['f_start'], metadata['f_stop'],
