@@ -67,6 +67,17 @@ class SineSweepGenerator:
     accumulating continuously through the wrap, which is what actually
     matters for driving a DAC without glitches.
 
+    An optional ``pre_dwell_time`` holds the frequency at ``f0`` for that
+    many seconds before the sweep law above is evaluated at all -- i.e. the
+    whole law is evaluated at ``t - pre_dwell_time`` (clamped to ``>= 0``)
+    instead of ``t``. This is meant to give a closed-loop amplitude
+    controller time to converge at a fixed frequency before the frequency
+    itself starts moving, so the recorded sweep starts from an already
+    -settled amplitude. Because it is still expressed as a single function
+    of the same continuously-accumulating ``t``, phase continuity across the
+    dwell-to-sweep transition is automatic -- there is no special-cased
+    transition logic.
+
     Parameters
     ----------
     sample_rate : float
@@ -86,6 +97,10 @@ class SineSweepGenerator:
     repeat : bool
         If ``True``, the sweep restarts from the beginning once it reaches
         the end instead of holding. Default ``False``.
+    pre_dwell_time : float
+        Time in seconds to hold the frequency at ``f0`` before the sweep
+        (or repeating sweep) begins. Default ``0.0`` (no dwell, matches
+        prior behavior exactly).
     initial_phase : float
         Starting phase in radians. Default ``0.0``.
     """
@@ -98,6 +113,7 @@ class SineSweepGenerator:
                  sweep_rate: float,
                  direction: str = 'up',
                  repeat: bool = False,
+                 pre_dwell_time: float = 0.0,
                  initial_phase: float = 0.0):
         if sweep_type not in VALID_SWEEP_TYPES:
             raise ValueError('sweep_type must be one of {:}, got {!r}'.format(
@@ -113,6 +129,8 @@ class SineSweepGenerator:
             raise ValueError('sweep_rate must be positive')
         if f_start == f_stop:
             raise ValueError('f_start and f_stop must differ')
+        if pre_dwell_time < 0:
+            raise ValueError('pre_dwell_time must be non-negative')
 
         self.sample_rate = float(sample_rate)
         self.sweep_type = sweep_type
@@ -121,6 +139,7 @@ class SineSweepGenerator:
         self.sweep_rate = float(sweep_rate)
         self.direction = direction
         self.repeat = repeat
+        self.pre_dwell_time = float(pre_dwell_time)
 
         self._f0 = self.f_start if direction == 'up' else self.f_stop
         self._f1 = self.f_stop if direction == 'up' else self.f_start
@@ -148,8 +167,15 @@ class SineSweepGenerator:
 
     @property
     def sweep_duration(self) -> float:
-        """Duration in seconds of one single sweep from start to stop."""
+        """Duration in seconds of one single sweep from start to stop
+        (excluding ``pre_dwell_time``)."""
         return self._duration
+
+    @property
+    def total_duration(self) -> float:
+        """``pre_dwell_time + sweep_duration``: time from generator start
+        until one single sweep has completed."""
+        return self.pre_dwell_time + self._duration
 
     @property
     def elapsed_time(self) -> float:
@@ -162,10 +188,11 @@ class SineSweepGenerator:
         Pure function of ``t`` (no recursive state), so it can be evaluated
         for any block of times independent of prior calls.
         """
+        t_dwelled = np.maximum(0.0, t - self.pre_dwell_time)
         if self.repeat and self._duration > 0:
-            t_eff = np.mod(t, self._duration)
+            t_eff = np.mod(t_dwelled, self._duration)
         else:
-            t_eff = np.minimum(t, self._duration)
+            t_eff = np.minimum(t_dwelled, self._duration)
         if self.sweep_type == 'linear':
             return self._f0 + self._sign * self.sweep_rate * t_eff
         else:

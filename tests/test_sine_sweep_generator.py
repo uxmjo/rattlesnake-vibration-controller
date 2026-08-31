@@ -154,3 +154,88 @@ def test_drive_amplitude_scales_output():
                               f_start=10.0, f_stop=20.0, sweep_rate=10.0)
     samples, _, phase = gen.generate_block(100, drive_amplitude=3.0)
     np.testing.assert_allclose(samples, 3.0 * np.sin(phase))
+
+
+def test_pre_dwell_time_default_is_backward_compatible():
+    """pre_dwell_time=0.0 (the default) must behave exactly as before."""
+    fs = 5000.0
+    gen_default = SineSweepGenerator(sample_rate=fs, sweep_type='linear',
+                                      f_start=10.0, f_stop=100.0, sweep_rate=20.0)
+    gen_explicit = SineSweepGenerator(sample_rate=fs, sweep_type='linear',
+                                       f_start=10.0, f_stop=100.0, sweep_rate=20.0,
+                                       pre_dwell_time=0.0)
+    s1, f1, p1 = gen_default.generate_block(2000, drive_amplitude=1.0)
+    s2, f2, p2 = gen_explicit.generate_block(2000, drive_amplitude=1.0)
+    np.testing.assert_allclose(f1, f2)
+    np.testing.assert_allclose(p1, p2)
+    assert gen_default.total_duration == pytest.approx(gen_default.sweep_duration)
+
+
+def test_pre_dwell_time_holds_f_start():
+    fs = 2000.0
+    dwell = 2.0
+    gen = SineSweepGenerator(sample_rate=fs, sweep_type='linear',
+                              f_start=50.0, f_stop=150.0, sweep_rate=10.0,
+                              pre_dwell_time=dwell)
+    n = int(3.5 * fs)  # spans past the 2s dwell into the sweep
+    samples, freq, phase = gen.generate_block(n, drive_amplitude=1.0)
+    t = np.arange(n) / fs
+    during_dwell = t < dwell
+    after_dwell = t > dwell + 0.01
+    assert np.all(freq[during_dwell] == pytest.approx(50.0))
+    # Once dwell ends, frequency should follow the normal linear law shifted
+    # by `dwell` seconds.
+    expected_after = 50.0 + 10.0 * (t[after_dwell] - dwell)
+    np.testing.assert_allclose(freq[after_dwell], expected_after, atol=1e-9)
+
+
+def test_pre_dwell_time_phase_continuous_at_transition():
+    """No phase jump/reset when crossing from dwell into the sweep."""
+    fs = 4000.0
+    dwell = 1.0
+    gen = SineSweepGenerator(sample_rate=fs, sweep_type='logarithmic',
+                              f_start=20.0, f_stop=200.0, sweep_rate=60.0,
+                              pre_dwell_time=dwell)
+    n = int(2.0 * fs)
+    samples, freq, phase = gen.generate_block(n, drive_amplitude=1.0)
+    dphase = np.diff(phase)
+    assert np.all(dphase > 0)
+    max_expected = 2 * np.pi * 200.0 / fs * 1.01
+    assert np.all(dphase < max_expected)
+    # No discontinuity specifically around the dwell->sweep boundary sample.
+    boundary = int(dwell * fs)
+    window = slice(boundary - 5, boundary + 5)
+    assert np.all(np.diff(phase[window]) > 0)
+    assert np.all(np.diff(phase[window]) < max_expected)
+
+
+def test_pre_dwell_time_shifts_sweep_duration_and_total_duration():
+    gen = SineSweepGenerator(sample_rate=1000.0, sweep_type='linear',
+                              f_start=10.0, f_stop=20.0, sweep_rate=10.0,
+                              pre_dwell_time=3.0)
+    assert gen.sweep_duration == pytest.approx(1.0)  # unaffected by dwell
+    assert gen.total_duration == pytest.approx(4.0)  # dwell + sweep_duration
+
+
+def test_pre_dwell_time_with_repeat():
+    """Dwell should only happen once at the very start, not on every repeat cycle."""
+    fs = 2000.0
+    dwell = 1.0
+    gen = SineSweepGenerator(sample_rate=fs, sweep_type='linear',
+                              f_start=10.0, f_stop=20.0, sweep_rate=10.0,
+                              pre_dwell_time=dwell, repeat=True)
+    # sweep_duration = 1.0s; run for dwell + 3 full sweep cycles
+    n = int((dwell + 3 * 1.0) * fs)
+    samples, freq, phase = gen.generate_block(n, drive_amplitude=1.0)
+    t = np.arange(n) / fs
+    assert np.all(freq[t < dwell] == pytest.approx(10.0))
+    # After the dwell, frequency should wrap (repeat) with period 1.0s,
+    # never re-entering a second dwell.
+    just_after_first_wrap = int((dwell + 1.0 + 0.01) * fs)
+    assert freq[just_after_first_wrap] == pytest.approx(10.0, abs=0.5)
+
+
+def test_negative_pre_dwell_time_raises():
+    with pytest.raises(ValueError):
+        SineSweepGenerator(sample_rate=1000.0, sweep_type='linear', f_start=10.0,
+                           f_stop=20.0, sweep_rate=10.0, pre_dwell_time=-1.0)

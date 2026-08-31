@@ -484,6 +484,35 @@
         </property>
        </widget>
       </item>
+      <item row="2" column="2">
+       <widget class="QLabel" name="pre_dwell_time_label">
+        <property name="text">
+         <string>Pre-Sweep Dwell Time</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="3">
+       <widget class="QDoubleSpinBox" name="pre_dwell_time_selector">
+        <property name="toolTip">
+         <string>Holds the frequency at Start Frequency for this long (with the force controller fully active) before the sweep itself begins, so the drive amplitude has already converged to the target force by the time the recorded sweep starts. 0 = no dwell, sweep begins immediately once ramped up.</string>
+        </property>
+        <property name="suffix">
+         <string> s</string>
+        </property>
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="minimum">
+         <double>0.000000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>3600.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>0.000000000000000</double>
+        </property>
+       </widget>
+      </item>
       <item row="3" column="0" colspan="4">
        <widget class="QLabel" name="warning_abort_note_label">
         <property name="text">

@@ -148,7 +148,8 @@ class SineForceControlParameters(AbstractMetadata):
                  max_drive_v: float,
                  abort_drive_v: float,
                  max_drive_step_v: float,
-                 ramp_time_s: float):
+                 ramp_time_s: float,
+                 pre_dwell_time_s: float):
         self.sample_rate = sample_rate
         self.output_sample_rate = output_sample_rate
         self.sweep_type = sweep_type
@@ -168,6 +169,7 @@ class SineForceControlParameters(AbstractMetadata):
         self.abort_drive_v = abort_drive_v
         self.max_drive_step_v = max_drive_step_v
         self.ramp_time_s = ramp_time_s
+        self.pre_dwell_time_s = pre_dwell_time_s
 
     def store_to_netcdf(self, netcdf_group_handle: nc4._netCDF4.Group):
         """Stores parameters and creates the diagnostic time-series variables."""
@@ -189,6 +191,7 @@ class SineForceControlParameters(AbstractMetadata):
         netcdf_group_handle.abort_drive_v = self.abort_drive_v
         netcdf_group_handle.max_drive_step_v = self.max_drive_step_v
         netcdf_group_handle.ramp_time_s = self.ramp_time_s
+        netcdf_group_handle.pre_dwell_time_s = self.pre_dwell_time_s
         netcdf_group_handle.createDimension('control_updates', None)
         netcdf_group_handle.createVariable('time', 'f8', ('control_updates',))
         netcdf_group_handle.createVariable('instantaneous_frequency', 'f8', ('control_updates',))
@@ -225,6 +228,7 @@ class SineForceControlParameters(AbstractMetadata):
             abort_drive_v=widget.abort_drive_selector.value(),
             max_drive_step_v=widget.max_drive_step_selector.value(),
             ramp_time_s=widget.ramp_time_selector.value(),
+            pre_dwell_time_s=widget.pre_dwell_time_selector.value(),
         )
 
 
@@ -375,6 +379,7 @@ class SineForceControlUI(AbstractUI):
         self.definition_widget.abort_drive_selector.setValue(group.abort_drive_v)
         self.definition_widget.max_drive_step_selector.setValue(group.max_drive_step_v)
         self.definition_widget.ramp_time_selector.setValue(group.ramp_time_s)
+        self.definition_widget.pre_dwell_time_selector.setValue(group.pre_dwell_time_s)
 
     def create_netcdf_file(self, filename):
         self.netcdf_handle = nc4.Dataset(filename, 'w', format='NETCDF4', clobber=True)
@@ -475,6 +480,7 @@ class SineForceControlUI(AbstractUI):
             ('Abort Drive', 'V peak (safety limit)'),
             ('Max Drive Step', 'V peak per update'),
             ('Ramp Time', 's'),
+            ('Pre-Sweep Dwell Time', 's'),
         ]
         for i, (label, note) in enumerate(rows, start=2):
             worksheet.cell(i, 1, label)
@@ -501,6 +507,7 @@ class SineForceControlUI(AbstractUI):
         self.definition_widget.abort_drive_selector.setValue(float(worksheet.cell(16, 2).value))
         self.definition_widget.max_drive_step_selector.setValue(float(worksheet.cell(17, 2).value))
         self.definition_widget.ramp_time_selector.setValue(float(worksheet.cell(18, 2).value))
+        self.definition_widget.pre_dwell_time_selector.setValue(float(worksheet.cell(19, 2).value))
 
 
 class SineForceControlEnvironment(AbstractEnvironment):
@@ -572,7 +579,8 @@ class SineForceControlEnvironment(AbstractEnvironment):
             f_stop=environment_parameters.f_stop,
             sweep_rate=environment_parameters.sweep_rate,
             direction=environment_parameters.direction,
-            repeat=environment_parameters.repeat)
+            repeat=environment_parameters.repeat,
+            pre_dwell_time=environment_parameters.pre_dwell_time_s)
         self.input_phase_generator = SineSweepGenerator(
             sample_rate=environment_parameters.sample_rate,
             sweep_type=environment_parameters.sweep_type,
@@ -580,7 +588,8 @@ class SineForceControlEnvironment(AbstractEnvironment):
             f_stop=environment_parameters.f_stop,
             sweep_rate=environment_parameters.sweep_rate,
             direction=environment_parameters.direction,
-            repeat=environment_parameters.repeat)
+            repeat=environment_parameters.repeat,
+            pre_dwell_time=environment_parameters.pre_dwell_time_s)
         self.estimator = ForceTrackingEstimator(
             sample_rate=environment_parameters.sample_rate,
             tracking_bandwidth_hz=environment_parameters.tracking_bandwidth_hz)
