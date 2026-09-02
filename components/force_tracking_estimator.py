@@ -118,14 +118,55 @@ class ForceTrackingEstimator:
         if valid_settle_time_constants <= 0:
             raise ValueError('valid_settle_time_constants must be positive')
         self.sample_rate = float(sample_rate)
+        self._valid_settle_time_constants = float(valid_settle_time_constants)
+        self.set_tracking_bandwidth(tracking_bandwidth_hz)
+        self.reset()
+
+    @staticmethod
+    def bandwidth_for_tracking_cycles(drive_frequency_hz: float, tracking_cycles: float) -> float:
+        """Returns the -3 dB bandwidth (Hz) that gives the I/Q tracking
+        filter a time constant of ``tracking_cycles`` periods of
+        ``drive_frequency_hz`` -- the same relation used by
+        :meth:`from_tracking_cycles`, exposed standalone so a caller
+        tracking a *sweeping* frequency can recompute the target bandwidth
+        for each new instantaneous frequency and feed it to
+        :meth:`set_tracking_bandwidth` (which updates an existing estimator
+        in place, preserving its filter state -- constructing a new
+        estimator per block would lose it)."""
+        if drive_frequency_hz <= 0:
+            raise ValueError('drive_frequency_hz must be positive')
+        if tracking_cycles <= 0:
+            raise ValueError('tracking_cycles must be positive')
+        return drive_frequency_hz / (2.0 * np.pi * tracking_cycles)
+
+    def set_tracking_bandwidth(self, tracking_bandwidth_hz: float) -> None:
+        """(Re)configures the I/Q tracking low-pass filter's -3 dB
+        bandwidth in place, keeping the current filter state (I/Q
+        accumulator) and sample counter untouched.
+
+        Intended to let the bandwidth continuously track the instantaneous
+        drive frequency during a sweep (e.g. via
+        :meth:`bandwidth_for_tracking_cycles`) instead of staying fixed --
+        a fixed absolute-Hz bandwidth cannot simultaneously reject the
+        demodulated double-frequency component (needs bandwidth well below
+        the drive frequency) across a sweep spanning a wide frequency
+        range, since "well below" the lowest swept frequency is very
+        different from "well below" the highest. Call this before each
+        :meth:`process_block` with the (possibly updated) target bandwidth
+        for the block about to be processed. This assumes the bandwidth
+        changes slowly relative to how often it is updated (true for a
+        quasi-stationary/continuous sweep), since the existing filter state
+        is reinterpreted under the new coefficients rather than reset.
+        """
+        if tracking_bandwidth_hz <= 0:
+            raise ValueError('tracking_bandwidth_hz must be positive')
         self.tracking_bandwidth_hz = float(tracking_bandwidth_hz)
         self._tau = 1.0 / (2.0 * np.pi * self.tracking_bandwidth_hz)
         self._alpha = 1.0 - np.exp(-1.0 / (self.sample_rate * self._tau))
         self._b = np.array([self._alpha])
         self._a = np.array([1.0, -(1.0 - self._alpha)])
         self._settle_samples = int(np.ceil(
-            valid_settle_time_constants * self._tau * self.sample_rate))
-        self.reset()
+            self._valid_settle_time_constants * self._tau * self.sample_rate))
 
     @classmethod
     def from_tracking_cycles(cls,
@@ -155,11 +196,7 @@ class ForceTrackingEstimator:
         valid_settle_time_constants : float
             See :class:`ForceTrackingEstimator`.
         """
-        if drive_frequency_hz <= 0:
-            raise ValueError('drive_frequency_hz must be positive')
-        if tracking_cycles <= 0:
-            raise ValueError('tracking_cycles must be positive')
-        bandwidth_hz = drive_frequency_hz / (2.0 * np.pi * tracking_cycles)
+        bandwidth_hz = cls.bandwidth_for_tracking_cycles(drive_frequency_hz, tracking_cycles)
         return cls(sample_rate, bandwidth_hz, valid_settle_time_constants)
 
     def reset(self) -> None:

@@ -166,3 +166,88 @@ def test_invalid_configuration_raises(bad_kwargs):
     kwargs.update(bad_kwargs)
     with pytest.raises(ValueError):
         ForceTrackingEstimator(**kwargs)
+
+
+def test_bandwidth_for_tracking_cycles_matches_from_tracking_cycles():
+    bw = ForceTrackingEstimator.bandwidth_for_tracking_cycles(
+        drive_frequency_hz=100.0, tracking_cycles=5.0)
+    estimator = ForceTrackingEstimator.from_tracking_cycles(
+        sample_rate=10000.0, drive_frequency_hz=100.0, tracking_cycles=5.0)
+    assert bw == pytest.approx(estimator.tracking_bandwidth_hz)
+
+
+@pytest.mark.parametrize('bad_kwargs', [
+    dict(drive_frequency_hz=0.0, tracking_cycles=5.0),
+    dict(drive_frequency_hz=100.0, tracking_cycles=0.0),
+])
+def test_bandwidth_for_tracking_cycles_invalid_raises(bad_kwargs):
+    with pytest.raises(ValueError):
+        ForceTrackingEstimator.bandwidth_for_tracking_cycles(**bad_kwargs)
+
+
+def test_set_tracking_bandwidth_updates_settle_samples_and_alpha():
+    estimator = ForceTrackingEstimator(sample_rate=1000.0, tracking_bandwidth_hz=10.0)
+    alpha_before = estimator._alpha
+    settle_before = estimator._settle_samples
+    estimator.set_tracking_bandwidth(1.0)
+    assert estimator.tracking_bandwidth_hz == pytest.approx(1.0)
+    assert estimator._alpha != alpha_before
+    # A narrower bandwidth means a longer time constant -> more settle samples.
+    assert estimator._settle_samples > settle_before
+
+
+def test_set_tracking_bandwidth_preserves_filter_state():
+    """Changing bandwidth mid-stream must not reset the I/Q accumulator or
+    the sample counter (unlike constructing a fresh estimator)."""
+    fs = 5000.0
+    estimator = ForceTrackingEstimator(sample_rate=fs, tracking_bandwidth_hz=5.0)
+    force = 10.0 * np.ones(2000)
+    phase = np.zeros(2000)
+    estimator.process_block(force, phase)
+    samples_before = estimator._samples_processed
+    zi_I_before = estimator._zi_I.copy()
+
+    estimator.set_tracking_bandwidth(2.0)
+    assert estimator._samples_processed == samples_before
+    np.testing.assert_array_equal(estimator._zi_I, zi_I_before)
+
+
+def test_set_tracking_bandwidth_invalid_raises():
+    estimator = ForceTrackingEstimator(sample_rate=1000.0, tracking_bandwidth_hz=5.0)
+    with pytest.raises(ValueError):
+        estimator.set_tracking_bandwidth(0.0)
+
+
+def test_adaptive_bandwidth_tracks_amplitude_through_wide_sweep():
+    """With a *fixed* bandwidth chosen for the high end of a wide sweep, the
+    demodulated double-frequency term is not rejected at the low end and the
+    amplitude estimate is corrupted there. Continuously adapting the
+    bandwidth (constant tracking_cycles, via set_tracking_bandwidth) must
+    recover a good amplitude estimate across the whole sweep instead."""
+    fs = 20000.0
+    amplitude = 80.0
+    tracking_cycles = 3.0
+    gen = SineSweepGenerator(sample_rate=fs, sweep_type='linear',
+                              f_start=5.0, f_stop=500.0, sweep_rate=50.0)
+    n_total = int(gen.sweep_duration * fs)
+    _, freq, phase = gen.generate_block(n_total, drive_amplitude=1.0)
+    force = amplitude * np.sin(phase)
+
+    block_size = 512
+    estimator = ForceTrackingEstimator(
+        sample_rate=fs,
+        tracking_bandwidth_hz=ForceTrackingEstimator.bandwidth_for_tracking_cycles(
+            500.0, tracking_cycles))
+    results = []
+    for start in range(0, n_total, block_size):
+        end = min(start + block_size, n_total)
+        block_freq = float(freq[start])
+        estimator.set_tracking_bandwidth(
+            ForceTrackingEstimator.bandwidth_for_tracking_cycles(block_freq, tracking_cycles))
+        results.append(estimator.process_block(force[start:end], phase[start:end]))
+
+    settled = [r for r in results if r.valid]
+    assert len(settled) > 10
+    late = settled[len(settled) // 4:]
+    for r in late:
+        assert r.amplitude == pytest.approx(amplitude, rel=0.15)

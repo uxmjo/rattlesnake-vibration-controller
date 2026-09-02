@@ -286,7 +286,7 @@
       <item row="2" column="1">
        <widget class="QDoubleSpinBox" name="tracking_bandwidth_selector">
         <property name="toolTip">
-         <string>-3dB bandwidth of the I/Q tracking filter. Narrow = less noise but slower response; wide = faster response but noisier.</string>
+         <string>-3dB bandwidth of the I/Q tracking filter. Narrow = less noise but slower response; wide = faster response but noisier. Ignored (fixed value not used) if Adaptive Tracking Bandwidth is checked -- see Tracking Cycles instead.</string>
         </property>
         <property name="suffix">
          <string> Hz</string>
@@ -360,6 +360,35 @@
         </property>
         <property name="value">
          <double>0.100000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="2">
+       <widget class="QCheckBox" name="adaptive_tracking_bandwidth_checkbox">
+        <property name="toolTip">
+         <string>If checked, the I/Q tracking filter's bandwidth continuously scales with the instantaneous sweep frequency (see Tracking Cycles) instead of staying fixed at Tracking Bandwidth. Recommended for sweeps spanning a wide frequency range: a fixed bandwidth cannot reject the demodulated double-frequency component well at both the low and the high end of a wide sweep at once.</string>
+        </property>
+        <property name="text">
+         <string>Adaptive Tracking Bandwidth</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="3">
+       <widget class="QDoubleSpinBox" name="tracking_cycles_selector">
+        <property name="toolTip">
+         <string>Only used if Adaptive Tracking Bandwidth is checked. I/Q tracking filter time constant, expressed in number of drive cycles at the instantaneous sweep frequency (tracking_bandwidth_hz = frequency / (2*pi*Tracking Cycles)). Larger = less noise but slower response, same trade-off as Tracking Bandwidth, just frequency-relative instead of absolute.</string>
+        </property>
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="minimum">
+         <double>0.100000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>1000.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>3.000000000000000</double>
         </property>
        </widget>
       </item>

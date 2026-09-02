@@ -29,17 +29,29 @@ def resonant_plant_gain(freq, fr=80.0, zeta=0.05, h0=2.0):
 
 
 def run_closed_loop(gen, estimator, controller, target_force, n_total,
-                     gain_fn, dropout_range=None):
+                     gain_fn, dropout_range=None, tracking_cycles=None):
     """Runs the closed loop for n_total samples in fixed-size blocks.
 
     dropout_range : optional (start_sample, stop_sample) during which the
         force measurement is corrupted (NaN) to simulate sensor loss.
+    tracking_cycles : optional. If given, before each block the estimator's
+        tracking bandwidth is updated to
+        ``ForceTrackingEstimator.bandwidth_for_tracking_cycles(freq, tracking_cycles)``
+        using the block's starting frequency -- i.e. an adaptive/proportional
+        bandwidth that scales with the instantaneous sweep frequency, mirroring
+        ``SineForceControlEnvironment``'s adaptive_tracking_bandwidth option
+        -- instead of the estimator's fixed constructor-time bandwidth.
 
     Returns a dict of per-block diagnostic lists.
     """
     drive_amplitude = controller.drive_amplitude
     diagnostics = {'relative_error': [], 'status': [], 'drive_amplitude': [],
-                    'valid': []}
+                    'valid': [],
+                    # Per-block, always appended (unlike 'relative_error'
+                    # above which skips invalid blocks) so callers can align
+                    # against a known sample/time window -- 'block_error' is
+                    # NaN for invalid blocks.
+                    'block_frequency': [], 'block_error': []}
     sample_index = 0
     for start in range(0, n_total, BLOCK_SIZE):
         n = min(BLOCK_SIZE, n_total - start)
@@ -48,6 +60,10 @@ def run_closed_loop(gen, estimator, controller, target_force, n_total,
         force = gain * drive_amplitude * np.sin(phase)
         if dropout_range is not None and dropout_range[0] <= start < dropout_range[1]:
             force = np.full_like(force, np.nan)
+        if tracking_cycles is not None:
+            estimator.set_tracking_bandwidth(
+                ForceTrackingEstimator.bandwidth_for_tracking_cycles(
+                    float(freq[0]), tracking_cycles))
         result = estimator.process_block(force, phase)
         measured = result.amplitude if result.valid else None
         ctrl_result = controller.update(target_force, measured, result.valid)
@@ -59,9 +75,13 @@ def run_closed_loop(gen, estimator, controller, target_force, n_total,
         diagnostics['drive_amplitude'].append(drive_amplitude)
         diagnostics['status'].append(ctrl_result.status)
         diagnostics['valid'].append(result.valid)
+        diagnostics['block_frequency'].append(float(freq[0]))
         if result.valid:
-            diagnostics['relative_error'].append(
-                abs(result.amplitude - target_force) / target_force)
+            relative_error = abs(result.amplitude - target_force) / target_force
+            diagnostics['relative_error'].append(relative_error)
+            diagnostics['block_error'].append(relative_error)
+        else:
+            diagnostics['block_error'].append(np.nan)
         sample_index += n
     return diagnostics
 
@@ -166,3 +186,57 @@ def test_closed_loop_sensor_dropout_does_not_spike_drive():
     np.testing.assert_allclose(drive_during_dropout, drive_during_dropout[0])
     # After recovery, the controller should resume moving toward the target.
     assert diagnostics['valid'][-1] is True
+
+
+def test_adaptive_tracking_bandwidth_beats_fixed_at_sweep_turnaround():
+    """Reproduces the real-world failure mode seen on an up/down/up sweep
+    spanning a wide frequency range (5 - 500 Hz, 100:1): a *fixed* tracking
+    bandwidth sized for good rejection at the high end (10 Hz, well below
+    500 Hz) is not well below the *low* end (5 Hz) -- the demodulated
+    double-frequency term leaks through there and corrupts the force
+    estimate/control, specifically each time the sweep revisits the low
+    end at a direction turnaround. An adaptive bandwidth (constant
+    tracking_cycles) with the *same* bandwidth at the high end must track
+    much better there instead, without needing a fresh cold-start settle
+    (the plant/gain/target here are chosen so the controller has already
+    long converged well before the turnaround, isolating the demodulation
+    effect from any startup transient)."""
+    f_start, f_stop = 5.0, 500.0
+    fixed_bandwidth_hz = 10.0
+    tracking_cycles = f_stop / (2 * np.pi * fixed_bandwidth_hz)  # matches fixed bw at f_stop
+    target_force = 5.0
+
+    def unity_plant(freq):
+        return 5.0 * np.ones_like(freq)  # F = 5*drive_amplitude*sin(phase)
+
+    def turnaround_error(tracking_cycles):
+        gen = SineSweepGenerator(sample_rate=FS, sweep_type='linear',
+                                  f_start=f_start, f_stop=f_stop, sweep_rate=50.0,
+                                  repeat=True, num_sweeps=3, alternate_direction=True)
+        estimator = ForceTrackingEstimator(sample_rate=FS, tracking_bandwidth_hz=fixed_bandwidth_hz)
+        controller = ForceAmplitudeController(alpha=0.3, force_floor=0.05,
+                                               max_drive_amplitude=1.25,
+                                               max_amplitude_step=0.01,
+                                               initial_drive_amplitude=0.2)
+        leg_samples = int(gen.sweep_duration * FS)
+        n_total = 3 * leg_samples
+        diagnostics = run_closed_loop(gen, estimator, controller, target_force,
+                                       n_total, unity_plant, tracking_cycles=tracking_cycles)
+        block_freq = np.array(diagnostics['block_frequency'])
+        block_error = np.array(diagnostics['block_error'])
+        # Leg 1 (down) ends and leg 2 (up) starts at sample index
+        # 2*leg_samples -- take a window straddling that turnaround, but
+        # skip the run's very first samples (leg 0's cold-start settle,
+        # not what this test is about).
+        block_index = np.arange(len(block_freq)) * BLOCK_SIZE
+        window = (block_index > 1.9 * leg_samples) & (block_index < 2.3 * leg_samples)
+        errors = block_error[window]
+        errors = errors[np.isfinite(errors)]
+        assert len(errors) > 5
+        return errors.mean()
+
+    error_fixed = turnaround_error(tracking_cycles=None)
+    error_adaptive = turnaround_error(tracking_cycles=tracking_cycles)
+
+    assert error_adaptive < error_fixed
+    assert error_adaptive < 0.15

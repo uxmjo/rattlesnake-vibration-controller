@@ -101,6 +101,11 @@ from .force_target_specification import ConstantForceTarget
 control_type = ControlTypes.SINE_FORCE
 WAIT_TIME = 0.001
 MAX_PLOT_SAMPLES = 2000
+# Floor applied to the adaptive tracking bandwidth (matches the Tracking
+# Bandwidth spinbox's own minimum) -- purely a numerical safety net, not a
+# meaningful physical limit, since the configured sweep frequency itself
+# never goes below f_start/f_stop (>0, validated at environment setup).
+MIN_ADAPTIVE_TRACKING_BANDWIDTH_HZ = 0.01
 
 SWEEP_TYPE_UI_TO_INTERNAL = {'Linear': 'linear', 'Logarithmic': 'logarithmic'}
 SWEEP_TYPE_INTERNAL_TO_UI = {v: k for k, v in SWEEP_TYPE_UI_TO_INTERNAL.items()}
@@ -144,6 +149,8 @@ class SineForceControlParameters(AbstractMetadata):
                  target_force: float,
                  force_floor: float,
                  tracking_bandwidth_hz: float,
+                 adaptive_tracking_bandwidth: bool,
+                 tracking_cycles: float,
                  controller_alpha: float,
                  control_update_period_s: float,
                  initial_drive_v: float,
@@ -166,6 +173,8 @@ class SineForceControlParameters(AbstractMetadata):
         self.target_force = target_force
         self.force_floor = force_floor
         self.tracking_bandwidth_hz = tracking_bandwidth_hz
+        self.adaptive_tracking_bandwidth = adaptive_tracking_bandwidth
+        self.tracking_cycles = tracking_cycles
         self.controller_alpha = controller_alpha
         self.control_update_period_s = control_update_period_s
         self.initial_drive_v = initial_drive_v
@@ -190,6 +199,8 @@ class SineForceControlParameters(AbstractMetadata):
         netcdf_group_handle.force_unit = 'peak'
         netcdf_group_handle.force_floor = self.force_floor
         netcdf_group_handle.tracking_bandwidth_hz = self.tracking_bandwidth_hz
+        netcdf_group_handle.adaptive_tracking_bandwidth = 1 if self.adaptive_tracking_bandwidth else 0
+        netcdf_group_handle.tracking_cycles = self.tracking_cycles
         netcdf_group_handle.controller_alpha = self.controller_alpha
         netcdf_group_handle.control_update_period_s = self.control_update_period_s
         netcdf_group_handle.initial_drive_v = self.initial_drive_v
@@ -229,6 +240,8 @@ class SineForceControlParameters(AbstractMetadata):
             target_force=widget.target_force_selector.value(),
             force_floor=widget.force_floor_selector.value(),
             tracking_bandwidth_hz=widget.tracking_bandwidth_selector.value(),
+            adaptive_tracking_bandwidth=widget.adaptive_tracking_bandwidth_checkbox.isChecked(),
+            tracking_cycles=widget.tracking_cycles_selector.value(),
             controller_alpha=widget.controller_alpha_selector.value(),
             control_update_period_s=widget.control_update_period_selector.value(),
             initial_drive_v=widget.initial_drive_selector.value(),
@@ -280,6 +293,10 @@ class SineForceControlUI(AbstractUI):
         self.definition_widget.sweep_type_selector.currentTextChanged.connect(
             self.update_sweep_rate_units)
         self.update_sweep_rate_units(self.definition_widget.sweep_type_selector.currentText())
+        self.definition_widget.adaptive_tracking_bandwidth_checkbox.toggled.connect(
+            self.update_tracking_bandwidth_enabled)
+        self.update_tracking_bandwidth_enabled(
+            self.definition_widget.adaptive_tracking_bandwidth_checkbox.isChecked())
         plot_item = self.run_widget.force_plot.getPlotItem()
         plot_item.showGrid(True, True, 0.25)
         plot_item.enableAutoRange()
@@ -298,6 +315,10 @@ class SineForceControlUI(AbstractUI):
             self.definition_widget.sweep_rate_selector.setSuffix(' Hz/s')
         else:
             self.definition_widget.sweep_rate_selector.setSuffix(' oct/min')
+
+    def update_tracking_bandwidth_enabled(self, adaptive_checked: bool):
+        self.definition_widget.tracking_bandwidth_selector.setEnabled(not adaptive_checked)
+        self.definition_widget.tracking_cycles_selector.setEnabled(adaptive_checked)
 
     def select_file(self):
         filename, file_filter = QtWidgets.QFileDialog.getSaveFileName(
@@ -346,21 +367,31 @@ class SineForceControlUI(AbstractUI):
         # amplitude to oscillate around the target instead of converging.
         # 5.0 here must match ForceTrackingEstimator's default
         # valid_settle_time_constants (see force_tracking_estimator.py).
-        settle_time_s = 5.0 / (2 * np.pi * data.tracking_bandwidth_hz)
+        # With adaptive tracking bandwidth, use the *worst case* (narrowest)
+        # bandwidth reached anywhere in the configured sweep -- i.e. at
+        # whichever of f_start/f_stop is lower -- since that is where the
+        # filter is slowest to settle.
+        if data.adaptive_tracking_bandwidth:
+            worst_case_bandwidth_hz = ForceTrackingEstimator.bandwidth_for_tracking_cycles(
+                min(data.f_start, data.f_stop), data.tracking_cycles)
+        else:
+            worst_case_bandwidth_hz = data.tracking_bandwidth_hz
+        settle_time_s = 5.0 / (2 * np.pi * worst_case_bandwidth_hz)
         if data.control_update_period_s < settle_time_s:
             QtWidgets.QMessageBox.warning(
                 self.definition_widget, 'Control Update Period May Be Too Short',
                 'Control Update Period ({:.4f} s) is shorter than the tracking '
-                'filter\'s settle time (~{:.4f} s at {:.2f} Hz bandwidth).\n\n'
+                'filter\'s settle time (~{:.4f} s at {:.2f} Hz bandwidth{:}).\n\n'
                 'The controller may react to a not-yet-settled amplitude estimate, '
                 'causing the drive/force amplitude to oscillate around the target '
                 'instead of converging.\n\n'
                 'Consider increasing Control Update Period to at least {:.4f} s '
-                '(with some margin), and/or increasing Tracking Bandwidth, and/or '
-                'reducing Controller Alpha for a more damped response.\n\n'
+                '(with some margin), and/or increasing Tracking Bandwidth / Tracking '
+                'Cycles, and/or reducing Controller Alpha for a more damped response.\n\n'
                 'You can still proceed with the current values.'.format(
-                    data.control_update_period_s, settle_time_s,
-                    data.tracking_bandwidth_hz, settle_time_s))
+                    data.control_update_period_s, settle_time_s, worst_case_bandwidth_hz,
+                    ' at the lowest swept frequency, adaptive' if data.adaptive_tracking_bandwidth else '',
+                    settle_time_s))
         self.environment_parameters = data
         return data
 
@@ -384,6 +415,10 @@ class SineForceControlUI(AbstractUI):
         self.definition_widget.target_force_selector.setValue(group.target_force)
         self.definition_widget.force_floor_selector.setValue(group.force_floor)
         self.definition_widget.tracking_bandwidth_selector.setValue(group.tracking_bandwidth_hz)
+        self.definition_widget.adaptive_tracking_bandwidth_checkbox.setChecked(
+            bool(getattr(group, 'adaptive_tracking_bandwidth', 0)))
+        self.definition_widget.tracking_cycles_selector.setValue(
+            float(getattr(group, 'tracking_cycles', 3.0)))
         self.definition_widget.controller_alpha_selector.setValue(group.controller_alpha)
         self.definition_widget.control_update_period_selector.setValue(group.control_update_period_s)
         self.definition_widget.initial_drive_selector.setValue(group.initial_drive_v)
@@ -486,7 +521,9 @@ class SineForceControlUI(AbstractUI):
             ('Force Channel Index', '0-based index into the channel table'),
             ('Target Force', 'N peak'),
             ('Force Floor', 'N peak'),
-            ('Tracking Bandwidth', 'Hz'),
+            ('Tracking Bandwidth', 'Hz. Ignored if Adaptive Tracking Bandwidth=1'),
+            ('Adaptive Tracking Bandwidth', '0 or 1 -- scale bandwidth with instantaneous sweep frequency'),
+            ('Tracking Cycles', 'Only used if Adaptive Tracking Bandwidth=1. Filter time constant in drive cycles'),
             ('Controller Alpha', '0 < alpha <= 1'),
             ('Control Update Period', 's'),
             ('Initial Drive', 'V peak'),
@@ -516,14 +553,16 @@ class SineForceControlUI(AbstractUI):
         self.definition_widget.target_force_selector.setValue(float(worksheet.cell(11, 2).value))
         self.definition_widget.force_floor_selector.setValue(float(worksheet.cell(12, 2).value))
         self.definition_widget.tracking_bandwidth_selector.setValue(float(worksheet.cell(13, 2).value))
-        self.definition_widget.controller_alpha_selector.setValue(float(worksheet.cell(14, 2).value))
-        self.definition_widget.control_update_period_selector.setValue(float(worksheet.cell(15, 2).value))
-        self.definition_widget.initial_drive_selector.setValue(float(worksheet.cell(16, 2).value))
-        self.definition_widget.max_drive_selector.setValue(float(worksheet.cell(17, 2).value))
-        self.definition_widget.abort_drive_selector.setValue(float(worksheet.cell(18, 2).value))
-        self.definition_widget.max_drive_step_selector.setValue(float(worksheet.cell(19, 2).value))
-        self.definition_widget.ramp_time_selector.setValue(float(worksheet.cell(20, 2).value))
-        self.definition_widget.pre_dwell_time_selector.setValue(float(worksheet.cell(21, 2).value))
+        self.definition_widget.adaptive_tracking_bandwidth_checkbox.setChecked(bool(int(worksheet.cell(14, 2).value)))
+        self.definition_widget.tracking_cycles_selector.setValue(float(worksheet.cell(15, 2).value))
+        self.definition_widget.controller_alpha_selector.setValue(float(worksheet.cell(16, 2).value))
+        self.definition_widget.control_update_period_selector.setValue(float(worksheet.cell(17, 2).value))
+        self.definition_widget.initial_drive_selector.setValue(float(worksheet.cell(18, 2).value))
+        self.definition_widget.max_drive_selector.setValue(float(worksheet.cell(19, 2).value))
+        self.definition_widget.abort_drive_selector.setValue(float(worksheet.cell(20, 2).value))
+        self.definition_widget.max_drive_step_selector.setValue(float(worksheet.cell(21, 2).value))
+        self.definition_widget.ramp_time_selector.setValue(float(worksheet.cell(22, 2).value))
+        self.definition_widget.pre_dwell_time_selector.setValue(float(worksheet.cell(23, 2).value))
 
 
 class SineForceControlEnvironment(AbstractEnvironment):
@@ -610,9 +649,14 @@ class SineForceControlEnvironment(AbstractEnvironment):
             num_sweeps=environment_parameters.num_sweeps,
             alternate_direction=environment_parameters.alternate_direction,
             pre_dwell_time=environment_parameters.pre_dwell_time_s)
+        if environment_parameters.adaptive_tracking_bandwidth:
+            initial_tracking_bandwidth_hz = ForceTrackingEstimator.bandwidth_for_tracking_cycles(
+                environment_parameters.f_start, environment_parameters.tracking_cycles)
+        else:
+            initial_tracking_bandwidth_hz = environment_parameters.tracking_bandwidth_hz
         self.estimator = ForceTrackingEstimator(
             sample_rate=environment_parameters.sample_rate,
-            tracking_bandwidth_hz=environment_parameters.tracking_bandwidth_hz)
+            tracking_bandwidth_hz=initial_tracking_bandwidth_hz)
         self.controller = ForceAmplitudeController(
             alpha=environment_parameters.controller_alpha,
             force_floor=environment_parameters.force_floor,
@@ -692,6 +736,11 @@ class SineForceControlEnvironment(AbstractEnvironment):
             force_samples = np.asarray(acquisition_data[self.force_channel_local_index], dtype=float)
             n = force_samples.shape[-1]
             _, freq_in, phase_in = self.input_phase_generator.generate_block(n, drive_amplitude=1.0)
+            if self.environment_parameters.adaptive_tracking_bandwidth:
+                target_bandwidth_hz = ForceTrackingEstimator.bandwidth_for_tracking_cycles(
+                    float(freq_in[0]), self.environment_parameters.tracking_cycles)
+                self.estimator.set_tracking_bandwidth(
+                    max(target_bandwidth_hz, MIN_ADAPTIVE_TRACKING_BANDWIDTH_HZ))
             self.last_result = self.estimator.process_block(force_samples, phase_in)
             self.last_frequency = float(freq_in[-1])
             self.elapsed_time += n / self.environment_parameters.sample_rate
