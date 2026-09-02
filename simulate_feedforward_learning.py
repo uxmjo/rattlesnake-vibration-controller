@@ -39,7 +39,7 @@ import matplotlib.pyplot as plt
 from components.sine_sweep_generator import SineSweepGenerator
 from components.force_tracking_estimator import ForceTrackingEstimator
 from components.force_amplitude_controller import ForceAmplitudeController, ControllerStatus
-from components.feedforward_map import FeedforwardMap
+from components.feedforward_map import FeedforwardMap, compose_drive_amplitude
 
 FS = 5000.0
 BLOCK_SIZE = 256
@@ -119,22 +119,27 @@ def run_simulation(f_start=5.0, f_stop=2000.0, target_force=6.0, n_legs=5,
         f_end = float(freq[-1])
 
         if feedforward_map is not None:
-            ff_value = feedforward_map.get(f_end, direction=direction)
-            raw_total = ff_value * ctrl_result.drive_amplitude
+            composition = compose_drive_amplitude(
+                feedforward_map, f_end, ctrl_result.drive_amplitude, total_drive_amplitude,
+                max_drive_v, max_drive_step_v, direction=direction)
+            total_drive_amplitude = composition.total_drive_amplitude
+            achieved_trim_gain = min(max(composition.achieved_trim_gain, 0.0),
+                                      trim_controller.max_drive_amplitude)
+            trim_controller.drive_amplitude = achieved_trim_gain  # anti-windup resync
+
             trust = ctrl_result.status is ControllerStatus.OK
-            learn_result = feedforward_map.update(f_end, observed_value=raw_total,
+            learn_result = feedforward_map.update(f_end, observed_value=total_drive_amplitude,
                                                     trust=trust, direction=direction)
-            feedback_pct = (ctrl_result.drive_amplitude - 1.0) * 100.0
+            ff_value = composition.feedforward_value
+            feedback_pct = (achieved_trim_gain - 1.0) * 100.0
             learning_applied = learn_result.updated
         else:
             ff_value = float('nan')
-            raw_total = ctrl_result.drive_amplitude
+            clipped = min(max(ctrl_result.drive_amplitude, 0.0), max_drive_v)
+            delta = min(max(clipped - total_drive_amplitude, -max_drive_step_v), max_drive_step_v)
+            total_drive_amplitude += delta
             feedback_pct = float('nan')
             learning_applied = False
-
-        clipped = min(max(raw_total, 0.0), max_drive_v)
-        delta = min(max(clipped - total_drive_amplitude, -max_drive_step_v), max_drive_step_v)
-        total_drive_amplitude += delta
 
         log['time'].append(gen.elapsed_time)
         log['leg'].append(leg)

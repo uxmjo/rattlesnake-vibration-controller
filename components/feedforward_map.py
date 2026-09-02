@@ -544,3 +544,75 @@ class FeedforwardMap:
         table = self._tables[self._key(direction)]
         mask = table.n_obs > 0
         return self.bin_centers[mask], table.value[mask], table.n_obs[mask]
+
+
+@dataclass
+class DriveComposition:
+    """Result of :func:`compose_drive_amplitude`.
+
+    Attributes
+    ----------
+    total_drive_amplitude : float
+        ``u_total`` -- the physical command to actually send to the shaker.
+    achieved_trim_gain : float
+        The trim gain ``g`` that *actually* produced ``total_drive_amplitude``
+        given ``feedforward_value`` -- may differ from the trim controller's
+        raw requested gain whenever ``max_total``/``max_step`` intervened.
+        Feed this back into the trim ``ForceAmplitudeController``'s
+        ``drive_amplitude`` (see module docstring "Anti-windup" note).
+    feedforward_value : float
+        ``A_FF(frequency_hz)`` used for this composition (the value
+        :meth:`FeedforwardMap.get` returned *before* any learning update
+        from this same observation).
+    """
+    total_drive_amplitude: float
+    achieved_trim_gain: float
+    feedforward_value: float
+
+
+def compose_drive_amplitude(feedforward_map: FeedforwardMap,
+                             frequency_hz: float,
+                             trim_gain_requested: float,
+                             previous_total_drive_amplitude: float,
+                             max_total_drive_amplitude: float,
+                             max_step: float,
+                             direction: Optional[str] = None) -> DriveComposition:
+    """Composes ``u_total = A_FF(f) * g`` and applies the hard physical
+    limits (``max_total_drive_amplitude``, and a slew limit ``max_step`` on
+    the change from ``previous_total_drive_amplitude``), with anti-windup.
+
+    This is the single shared implementation of the composition step used
+    by both ``SineForceControlEnvironment`` and the test/simulation harnesses
+    that mirror it -- previously duplicated inline in three places, which is
+    exactly how an anti-windup fix could silently drift out of sync between
+    them. See the module docstring's "Composition with the existing
+    controller" section for the ``u_total = A_FF(f) * g`` design, and the
+    Anti-windup note below for why ``achieved_trim_gain`` must be written
+    back into the trim controller's own state by the caller.
+
+    Anti-windup (back-calculation)
+    -------------------------------
+    ``max_total_drive_amplitude``/``max_step`` are hard *physical* limits
+    the trim controller's own multiplicative ratio law has no visibility
+    into (they are enforced here, externally, on the *composed* signal).
+    Without correcting for this, the trim's requested gain keeps marching
+    further away from reality every time this function's clamping actually
+    binds, so it winds up pinned near its own configured ceiling/floor
+    regardless of the true remaining error -- the classic actuator-
+    saturation windup failure mode. The caller must overwrite the trim
+    controller's ``drive_amplitude`` with this result's
+    ``achieved_trim_gain`` (clamped to the trim controller's own valid
+    range) after every call, so its *next* update starts from what was
+    actually applied.
+    """
+    ff_value = feedforward_map.get(frequency_hz, direction=direction)
+    raw_total = ff_value * trim_gain_requested
+
+    clipped = min(max(raw_total, 0.0), max_total_drive_amplitude)
+    delta = min(max(clipped - previous_total_drive_amplitude, -max_step), max_step)
+    total = previous_total_drive_amplitude + delta
+
+    achieved_trim_gain = (total / ff_value) if ff_value > 0 else trim_gain_requested
+    return DriveComposition(total_drive_amplitude=total,
+                             achieved_trim_gain=achieved_trim_gain,
+                             feedforward_value=ff_value)

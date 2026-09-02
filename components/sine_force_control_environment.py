@@ -97,7 +97,7 @@ from .sine_sweep_generator import SineSweepGenerator
 from .force_tracking_estimator import ForceTrackingEstimator
 from .force_amplitude_controller import ForceAmplitudeController, ControllerStatus
 from .force_target_specification import ConstantForceTarget
-from .feedforward_map import FeedforwardMap
+from .feedforward_map import FeedforwardMap, compose_drive_amplitude
 
 control_type = ControlTypes.SINE_FORCE
 WAIT_TIME = 0.001
@@ -917,26 +917,34 @@ class SineForceControlEnvironment(AbstractEnvironment):
             self._last_feedforward_confidence = float('nan')
             self._last_learning_applied = False
         else:
-            ff_value = self.feedforward_map.get(frequency, direction=direction)
-            trim_gain = ctrl_result.drive_amplitude
-            raw_total = ff_value * trim_gain
+            composition = compose_drive_amplitude(
+                self.feedforward_map, frequency, ctrl_result.drive_amplitude,
+                self.total_drive_amplitude, self.environment_parameters.max_drive_v,
+                self.environment_parameters.max_drive_step_v, direction=direction)
+            self.total_drive_amplitude = composition.total_drive_amplitude
 
-            # Learn from this update's *composed* command -- i.e. what the
-            # fast loop currently believes is required to hit the target
-            # force -- only when that belief is actually trustworthy (fast
-            # loop not held/saturated, tracking estimator settled -- see
+            # Anti-windup: resync the trim controller's own state to what was
+            # actually achieved (see compose_drive_amplitude docstring) --
+            # otherwise it keeps marching ahead of physical reality every
+            # time max_drive_v/max_drive_step_v clamp the composed signal,
+            # and winds up pinned near its own feedforward_trim_gain_max
+            # ceiling/floor regardless of the true remaining error.
+            achieved_trim_gain = min(max(composition.achieved_trim_gain, 0.0),
+                                      self.controller.max_drive_amplitude)
+            self.controller.drive_amplitude = achieved_trim_gain
+
+            # Learn from what was actually achieved (post slew/clip) -- that
+            # is what the *next* force measurement will actually reflect --
+            # rather than a possibly still-limited requested value. Only
+            # when trustworthy (fast loop's own ratio-law request was not
+            # held/saturated, tracking estimator settled -- see
             # ControllerStatus and ForceTrackingResult.valid).
             trust = ctrl_result.status is ControllerStatus.OK
             learn_result = self.feedforward_map.update(
-                frequency, observed_value=raw_total, trust=trust, direction=direction)
+                frequency, observed_value=self.total_drive_amplitude, trust=trust, direction=direction)
 
-            clipped = min(max(raw_total, 0.0), self.environment_parameters.max_drive_v)
-            max_step = self.environment_parameters.max_drive_step_v
-            delta = min(max(clipped - self.total_drive_amplitude, -max_step), max_step)
-            self.total_drive_amplitude = self.total_drive_amplitude + delta
-
-            self._last_feedforward_value = ff_value
-            self._last_feedback_correction_pct = (trim_gain - 1.0) * 100.0
+            self._last_feedforward_value = composition.feedforward_value
+            self._last_feedback_correction_pct = (achieved_trim_gain - 1.0) * 100.0
             self._last_feedforward_confidence = self.feedforward_map.confidence(frequency, direction=direction)
             self._last_learning_applied = learn_result.updated
 

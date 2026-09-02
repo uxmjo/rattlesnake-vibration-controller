@@ -16,7 +16,7 @@ from components.sine_sweep_generator import SineSweepGenerator
 from components.force_tracking_estimator import ForceTrackingEstimator
 from components.force_amplitude_controller import (
     ForceAmplitudeController, ControllerStatus)
-from components.feedforward_map import FeedforwardMap
+from components.feedforward_map import FeedforwardMap, compose_drive_amplitude
 
 FS = 5000.0
 BLOCK_SIZE = 256
@@ -249,10 +249,16 @@ def run_closed_loop_with_feedforward(gen, estimator, trim_controller, feedforwar
     """Mirrors SineForceControlEnvironment._update_feedforward_and_compose:
     u_total = A_FF(f) * g, g from the (unmodified) ForceAmplitudeController
     reused as a trim, learned into feedforward_map from u_total whenever the
-    trim status is OK (estimator valid, trim not held/saturated)."""
+    trim status is OK (estimator valid, trim not held/saturated). Uses the
+    same compose_drive_amplitude() (incl. anti-windup) as the real
+    environment, rather than a separately hand-duplicated copy of that
+    math -- see that function's docstring for why (a duplicated copy is
+    exactly how this composition's anti-windup fix could silently drift out
+    of sync between the real environment and this test harness)."""
     total_drive_amplitude = feedforward_map.initial_estimate
     diagnostics = {'leg': [], 'direction': [], 'frequency': [],
-                    'relative_error': [], 'feedback_pct': [], 'total_drive': []}
+                    'relative_error': [], 'feedback_pct': [], 'total_drive': [],
+                    'status': []}
     for start in range(0, n_total, BLOCK_SIZE):
         n = min(BLOCK_SIZE, n_total - start)
         samples, freq, phase = gen.generate_block(n, drive_amplitude=total_drive_amplitude)
@@ -264,14 +270,17 @@ def run_closed_loop_with_feedforward(gen, estimator, trim_controller, feedforwar
 
         leg, direction = gen.leg_and_direction(gen.elapsed_time)
         f_end = float(freq[-1])
-        ff_value = feedforward_map.get(f_end, direction=direction)
-        raw_total = ff_value * ctrl_result.drive_amplitude
-        trust = ctrl_result.status is ControllerStatus.OK
-        feedforward_map.update(f_end, observed_value=raw_total, trust=trust, direction=direction)
+        composition = compose_drive_amplitude(
+            feedforward_map, f_end, ctrl_result.drive_amplitude, total_drive_amplitude,
+            max_drive_v, max_drive_step_v, direction=direction)
+        total_drive_amplitude = composition.total_drive_amplitude
 
-        clipped = min(max(raw_total, 0.0), max_drive_v)
-        delta = min(max(clipped - total_drive_amplitude, -max_drive_step_v), max_drive_step_v)
-        total_drive_amplitude += delta
+        achieved_trim_gain = min(max(composition.achieved_trim_gain, 0.0),
+                                  trim_controller.max_drive_amplitude)
+        trim_controller.drive_amplitude = achieved_trim_gain
+
+        trust = ctrl_result.status is ControllerStatus.OK
+        feedforward_map.update(f_end, observed_value=total_drive_amplitude, trust=trust, direction=direction)
 
         assert np.isfinite(total_drive_amplitude)
         assert 0.0 <= total_drive_amplitude <= max_drive_v
@@ -280,7 +289,8 @@ def run_closed_loop_with_feedforward(gen, estimator, trim_controller, feedforwar
         diagnostics['direction'].append(direction)
         diagnostics['frequency'].append(f_end)
         diagnostics['total_drive'].append(total_drive_amplitude)
-        diagnostics['feedback_pct'].append((ctrl_result.drive_amplitude - 1.0) * 100.0)
+        diagnostics['feedback_pct'].append((achieved_trim_gain - 1.0) * 100.0)
+        diagnostics['status'].append(ctrl_result.status)
         if result.valid:
             diagnostics['relative_error'].append(abs(result.amplitude - target_force) / target_force)
         else:
@@ -346,3 +356,110 @@ def test_feedforward_learning_shrinks_feedback_correction_over_sweeps():
     freqs, values, n_obs = feedforward_map.curve()
     assert len(freqs) > 5
     assert np.ptp(values) > 0.05
+
+
+def test_trim_controller_does_not_windup_when_composition_is_slew_limited():
+    """Regression test for an actuator-saturation windup bug: whenever the
+    *composed* command (u_total = A_FF(f) * g) is limited by max_drive_v/
+    max_drive_step_v -- physical limits the trim controller's own ratio law
+    has no visibility into -- the trim's internal state `g` must track what
+    was actually applied, not keep marching ahead of it. Without the
+    anti-windup back-calculation in compose_drive_amplitude(), `g` races
+    up toward its own ceiling every tick the true error stays large (which
+    it must, while the composed signal is still catching up) and then stays
+    pinned there long after the plant makes the target reachable again --
+    which is exactly the "garbage learned curve values slammed to their
+    hard min/max clamps, and force is completely mis-controlled" failure
+    mode this reproduces at a fixed dwell frequency for clarity."""
+    # Dwell at a fixed frequency (matches the existing dropout test's
+    # trick: f_start ~= f_stop).
+    gen = SineSweepGenerator(sample_rate=FS, sweep_type='linear',
+                              f_start=80.0, f_stop=80.0001, sweep_rate=1.0)
+    estimator = ForceTrackingEstimator(sample_rate=FS, tracking_bandwidth_hz=10.0)
+    target_force = 5.0
+    max_drive_v = 5.0
+    # Deliberately tight, as in the reported real-world case, so the
+    # composed command cannot follow a large step in required amplitude
+    # within a single dwell -- forcing many ticks of sustained clamping.
+    max_drive_step_v = 0.01
+    trim_controller = ForceAmplitudeController(alpha=0.15, force_floor=0.05,
+                                                max_drive_amplitude=3.0,
+                                                max_amplitude_step=0.5,
+                                                initial_drive_amplitude=1.0)
+    feedforward_map = FeedforwardMap(f_min=79.0, f_max=81.0, initial_estimate=0.5,
+                                      value_min=0.05, value_max=max_drive_v,
+                                      bins_per_decade=10.0, learning_rate=0.2)
+
+    n_step1 = int(2.0 * FS)   # easy plant: required drive ~0.5 V, quickly reachable
+    n_step2 = int(3.0 * FS)   # hard plant: required drive jumps ~40x, NOT reachable
+                              # within this window given the tight slew limit
+    n_step3 = int(3.0 * FS)   # back to the easy plant
+
+    current_gain = [10.0]  # required V = target/gain = 5/10 = 0.5 V
+
+    def stepped_plant(freq):
+        return np.full_like(freq, current_gain[0])
+
+    total_drive_amplitude = feedforward_map.initial_estimate
+    feedback_pct_by_phase = {'easy': [], 'hard': [], 'easy_again': []}
+    elapsed_samples = 0
+
+    for phase_name, n_phase, gain in (('easy', n_step1, 10.0),
+                                       ('hard', n_step2, 0.25),
+                                       ('easy_again', n_step3, 10.0)):
+        current_gain[0] = gain
+        phase_start = elapsed_samples
+        while elapsed_samples - phase_start < n_phase:
+            n = min(BLOCK_SIZE, n_phase - (elapsed_samples - phase_start))
+            samples, freq, phase = gen.generate_block(n, drive_amplitude=total_drive_amplitude)
+            force = stepped_plant(freq) * total_drive_amplitude * np.sin(phase)
+            result = estimator.process_block(force, phase)
+            measured = result.amplitude if result.valid else None
+            ctrl_result = trim_controller.update(target_force, measured, result.valid)
+
+            composition = compose_drive_amplitude(
+                feedforward_map, float(freq[-1]), ctrl_result.drive_amplitude,
+                total_drive_amplitude, max_drive_v, max_drive_step_v, direction='up')
+            total_drive_amplitude = composition.total_drive_amplitude
+            achieved_trim_gain = min(max(composition.achieved_trim_gain, 0.0),
+                                      trim_controller.max_drive_amplitude)
+            trim_controller.drive_amplitude = achieved_trim_gain
+
+            trust = ctrl_result.status is ControllerStatus.OK
+            feedforward_map.update(float(freq[-1]), observed_value=total_drive_amplitude,
+                                    trust=trust, direction='up')
+
+            feedback_pct_by_phase[phase_name].append((achieved_trim_gain - 1.0) * 100.0)
+            elapsed_samples += n
+
+    hard = np.array(feedback_pct_by_phase['hard'])
+    easy_again = np.array(feedback_pct_by_phase['easy_again'])
+
+    assert np.isfinite(total_drive_amplitude)
+    assert 0.0 <= total_drive_amplitude <= max_drive_v
+
+    # Without anti-windup, the trim races to its own feedforward_trim_gain_max
+    # ceiling (here 3.0, i.e. +200% feedback correction) and sits pinned
+    # there for the entire 'hard' phase, since the composed signal cannot
+    # possibly keep up (max_drive_step_v is far too tight) -- so the trim's
+    # own ratio law just keeps requesting more, unaware its last request was
+    # never actually applied. With anti-windup, the trim's *next* request is
+    # always anchored to what was actually achieved, so it stays a modest,
+    # bounded correction relative to the (slowly climbing) achieved value
+    # instead -- verified numerically to differ dramatically (~8% vs. ~195%
+    # peak) between the fixed and the pre-fix composition.
+    assert np.max(np.abs(hard)) < 50.0
+
+    # Symmetric check coming out of the hard phase: without anti-windup the
+    # correction overshoots wildly in *both* directions once the target
+    # becomes reachable again (observed ~[-99%, +171%], a >250-point swing,
+    # as the pinned-high trim first overshoots the now-easy target and the
+    # ratio law has to claw all the way back) -- with anti-windup the swing
+    # stays small since there was never a large pinned-up state to unwind.
+    assert (easy_again.max() - easy_again.min()) < 50.0
+
+    # The feedforward map must not have had a wildly wrong value slammed
+    # into its bin as a direct consequence of windup during the hard phase.
+    freqs, values, n_obs = feedforward_map.curve()
+    assert len(freqs) > 0
+    assert np.all(values < feedforward_map.value_max * 0.95)
