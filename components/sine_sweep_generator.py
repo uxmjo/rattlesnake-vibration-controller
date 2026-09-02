@@ -231,12 +231,11 @@ class SineSweepGenerator:
         """Total time in seconds elapsed since construction/:meth:`reset`."""
         return self._elapsed_samples / self.sample_rate
 
-    def _frequency_law(self, t: np.ndarray) -> np.ndarray:
-        """Evaluates the instantaneous frequency at absolute time(s) ``t``.
-
-        Pure function of ``t`` (no recursive state), so it can be evaluated
-        for any block of times independent of prior calls.
-        """
+    def _leg_and_local_time(self, t: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Returns ``(leg, t_eff)``: the (0-based, clamped to the configured
+        number of legs) sweep-leg index and the elapsed time within that leg,
+        for absolute time(s) ``t``. Pure function of ``t``, shared by
+        :meth:`_frequency_law` and :meth:`leg_and_direction`."""
         t_dwelled = np.maximum(0.0, t - self.pre_dwell_time)
         T = self._duration
         raw_leg = np.floor(t_dwelled / T)
@@ -245,6 +244,15 @@ class SineSweepGenerator:
         else:
             leg = raw_leg
         t_eff = np.clip(t_dwelled - leg * T, 0.0, T)
+        return leg, t_eff
+
+    def _frequency_law(self, t: np.ndarray) -> np.ndarray:
+        """Evaluates the instantaneous frequency at absolute time(s) ``t``.
+
+        Pure function of ``t`` (no recursive state), so it can be evaluated
+        for any block of times independent of prior calls.
+        """
+        leg, t_eff = self._leg_and_local_time(t)
 
         if self.alternate_direction:
             odd_leg = np.mod(leg, 2) >= 1
@@ -262,6 +270,28 @@ class SineSweepGenerator:
             return leg_start + leg_sign * self.sweep_rate * t_eff
         else:
             return leg_start * 2.0 ** (leg_sign * self._k * t_eff)
+
+    def leg_and_direction(self, t: float) -> Tuple[int, str]:
+        """Returns ``(leg_index, direction)`` at absolute time ``t``.
+
+        ``leg_index`` is 0-based (clamped to the last configured leg once
+        held, matching :meth:`_frequency_law`'s own clamping -- so this
+        stays well-defined after the sweep has finished). ``direction`` is
+        ``'up'`` or ``'down'``, the *instantaneous* frequency-trajectory
+        direction of that leg -- i.e. this generator's own ``direction`` for
+        even legs, and the reverse for odd legs (only reachable with
+        ``alternate_direction=True``). Intended for tagging feedforward
+        learning observations and diagnostics by sweep leg/direction (see
+        ``components/feedforward_map.py``) without needing to duplicate this
+        generator's own leg bookkeeping elsewhere.
+        """
+        leg_arr, _ = self._leg_and_local_time(np.asarray(float(t)))
+        leg = int(leg_arr)
+        odd_leg = self.alternate_direction and (leg % 2 == 1)
+        base_direction = self.direction
+        if not odd_leg:
+            return leg, base_direction
+        return leg, ('down' if base_direction == 'up' else 'up')
 
     def generate_block(self, num_samples: int, drive_amplitude
                         ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:

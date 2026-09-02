@@ -16,6 +16,7 @@ from components.sine_sweep_generator import SineSweepGenerator
 from components.force_tracking_estimator import ForceTrackingEstimator
 from components.force_amplitude_controller import (
     ForceAmplitudeController, ControllerStatus)
+from components.feedforward_map import FeedforwardMap
 
 FS = 5000.0
 BLOCK_SIZE = 256
@@ -240,3 +241,108 @@ def test_adaptive_tracking_bandwidth_beats_fixed_at_sweep_turnaround():
 
     assert error_adaptive < error_fixed
     assert error_adaptive < 0.15
+
+
+def run_closed_loop_with_feedforward(gen, estimator, trim_controller, feedforward_map,
+                                      target_force, n_total, gain_fn, max_drive_v,
+                                      max_drive_step_v):
+    """Mirrors SineForceControlEnvironment._update_feedforward_and_compose:
+    u_total = A_FF(f) * g, g from the (unmodified) ForceAmplitudeController
+    reused as a trim, learned into feedforward_map from u_total whenever the
+    trim status is OK (estimator valid, trim not held/saturated)."""
+    total_drive_amplitude = feedforward_map.initial_estimate
+    diagnostics = {'leg': [], 'direction': [], 'frequency': [],
+                    'relative_error': [], 'feedback_pct': [], 'total_drive': []}
+    for start in range(0, n_total, BLOCK_SIZE):
+        n = min(BLOCK_SIZE, n_total - start)
+        samples, freq, phase = gen.generate_block(n, drive_amplitude=total_drive_amplitude)
+        gain = gain_fn(freq)
+        force = gain * total_drive_amplitude * np.sin(phase)
+        result = estimator.process_block(force, phase)
+        measured = result.amplitude if result.valid else None
+        ctrl_result = trim_controller.update(target_force, measured, result.valid)
+
+        leg, direction = gen.leg_and_direction(gen.elapsed_time)
+        f_end = float(freq[-1])
+        ff_value = feedforward_map.get(f_end, direction=direction)
+        raw_total = ff_value * ctrl_result.drive_amplitude
+        trust = ctrl_result.status is ControllerStatus.OK
+        feedforward_map.update(f_end, observed_value=raw_total, trust=trust, direction=direction)
+
+        clipped = min(max(raw_total, 0.0), max_drive_v)
+        delta = min(max(clipped - total_drive_amplitude, -max_drive_step_v), max_drive_step_v)
+        total_drive_amplitude += delta
+
+        assert np.isfinite(total_drive_amplitude)
+        assert 0.0 <= total_drive_amplitude <= max_drive_v
+
+        diagnostics['leg'].append(leg)
+        diagnostics['direction'].append(direction)
+        diagnostics['frequency'].append(f_end)
+        diagnostics['total_drive'].append(total_drive_amplitude)
+        diagnostics['feedback_pct'].append((ctrl_result.drive_amplitude - 1.0) * 100.0)
+        if result.valid:
+            diagnostics['relative_error'].append(abs(result.amplitude - target_force) / target_force)
+        else:
+            diagnostics['relative_error'].append(np.nan)
+    return diagnostics
+
+
+def test_feedforward_learning_shrinks_feedback_correction_over_sweeps():
+    """End-to-end test of the feedforward architecture described in
+    components/feedforward_map.py: across several continuous UP/DOWN sweep
+    legs through a resonance, the trim gain's excursion away from 1.0 (i.e.
+    |feedback_correction_pct|) should shrink leg-to-leg as the feedforward
+    map learns the required drive amplitude at each frequency, while the
+    measured force amplitude stays close to target throughout (no reset or
+    jump in behavior at the direction turnarounds)."""
+    f_start, f_stop = 20.0, 300.0
+    target_force = 4.0
+    # Chosen (and verified numerically) so the required drive amplitude
+    # stays within [value_min, max_drive_v] across the whole swept band --
+    # otherwise the fast loop saturates (status != OK) and never trusts the
+    # feedforward layer to learn from, which is a different, already-covered
+    # scenario (see test_closed_loop_saturates_without_instability above).
+    max_drive_v = 30.0
+    n_legs = 5
+
+    gen = SineSweepGenerator(sample_rate=FS, sweep_type='logarithmic',
+                              f_start=f_start, f_stop=f_stop, sweep_rate=40.0,
+                              repeat=True, num_sweeps=n_legs, alternate_direction=True)
+    estimator = ForceTrackingEstimator(sample_rate=FS, tracking_bandwidth_hz=8.0)
+    trim_controller = ForceAmplitudeController(alpha=0.5, force_floor=0.05,
+                                                max_drive_amplitude=3.0,
+                                                max_amplitude_step=0.5,
+                                                initial_drive_amplitude=1.0)
+    feedforward_map = FeedforwardMap(f_min=f_start, f_max=f_stop, initial_estimate=1.0,
+                                      value_min=0.02, value_max=max_drive_v,
+                                      bins_per_decade=15.0, learning_rate=0.15)
+
+    leg_duration = gen.sweep_duration
+    n_total = int(n_legs * leg_duration * FS)
+    diagnostics = run_closed_loop_with_feedforward(
+        gen, estimator, trim_controller, feedforward_map, target_force, n_total,
+        resonant_plant_gain, max_drive_v=max_drive_v, max_drive_step_v=3.0)
+
+    leg = np.array(diagnostics['leg'])
+    feedback_pct = np.abs(np.array(diagnostics['feedback_pct']))
+    relative_error = np.array(diagnostics['relative_error'])
+
+    # Mean |feedback correction| in the first leg vs. the last leg -- must
+    # shrink substantially as the feedforward map takes over.
+    first_leg_feedback = feedback_pct[leg == 0].mean()
+    last_leg_feedback = feedback_pct[leg == n_legs - 1].mean()
+    assert last_leg_feedback < 0.5 * first_leg_feedback
+
+    # Force tracking must stay reasonable throughout, including at the
+    # direction turnarounds -- no blow-up or instability from the added
+    # feedforward layer.
+    finite_errors = relative_error[np.isfinite(relative_error)]
+    assert len(finite_errors) > 100
+    assert finite_errors[len(finite_errors) // 2:].mean() < 0.3
+
+    # The feedforward map must have actually learned a nontrivial curve,
+    # not stayed at its initial flat estimate everywhere.
+    freqs, values, n_obs = feedforward_map.curve()
+    assert len(freqs) > 5
+    assert np.ptp(values) > 0.05

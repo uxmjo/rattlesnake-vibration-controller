@@ -97,6 +97,7 @@ from .sine_sweep_generator import SineSweepGenerator
 from .force_tracking_estimator import ForceTrackingEstimator
 from .force_amplitude_controller import ForceAmplitudeController, ControllerStatus
 from .force_target_specification import ConstantForceTarget
+from .feedforward_map import FeedforwardMap
 
 control_type = ControlTypes.SINE_FORCE
 WAIT_TIME = 0.001
@@ -106,6 +107,28 @@ MAX_PLOT_SAMPLES = 2000
 # meaningful physical limit, since the configured sweep frequency itself
 # never goes below f_start/f_stop (>0, validated at environment setup).
 MIN_ADAPTIVE_TRACKING_BANDWIDTH_HZ = 0.01
+
+# Feedforward learning knobs that are deliberately *not* exposed as UI
+# fields (unlike Learning Rate / Feedforward Min-Max / Bins-per-Decade,
+# which materially change test behavior and are worth exposing) -- these
+# are robustness internals of components.feedforward_map.FeedforwardMap
+# with defaults that should rarely need changing; see that module's
+# docstring for what each one protects against.
+FEEDFORWARD_OUTLIER_REJECT_RATIO = 4.0
+FEEDFORWARD_OUTLIER_REJECT_MIN_OBSERVATIONS = 2.0
+FEEDFORWARD_MAX_RELATIVE_STEP_PER_UPDATE = 0.3
+FEEDFORWARD_MAX_OBSERVATIONS_CAP = 50.0
+# Not wired to the UI: a single shared A_FF(f) curve is learned from both
+# sweep directions by default (simpler, more sample-efficient). Flipping
+# this to True (and adding UI for it) is the extension point mentioned in
+# the design notes for separately learning A_FF_up(f)/A_FF_down(f) should a
+# real hysteresis/sweep-rate effect ever be observed in practice.
+FEEDFORWARD_SEPARATE_DIRECTION = False
+# Per-update step limit (dimensionless) on the trim gain `g` in
+# u_total = A_FF(f) * g -- the feedforward-mode analogue of Max Drive
+# Change/Update (max_drive_step_v), which instead bounds the *composed*
+# command directly (see SineForceControlEnvironment._compose_drive_amplitude).
+FEEDFORWARD_TRIM_GAIN_MAX_STEP = 0.5
 
 SWEEP_TYPE_UI_TO_INTERNAL = {'Linear': 'linear', 'Logarithmic': 'logarithmic'}
 SWEEP_TYPE_INTERNAL_TO_UI = {v: k for k, v in SWEEP_TYPE_UI_TO_INTERNAL.items()}
@@ -158,7 +181,16 @@ class SineForceControlParameters(AbstractMetadata):
                  abort_drive_v: float,
                  max_drive_step_v: float,
                  ramp_time_s: float,
-                 pre_dwell_time_s: float):
+                 pre_dwell_time_s: float,
+                 feedforward_enabled: bool = False,
+                 feedforward_learning_rate: float = 0.2,
+                 feedforward_min_v: float = 0.05,
+                 feedforward_max_v: float = 1.25,
+                 feedforward_trim_gain_max: float = 3.0,
+                 feedforward_bins_per_decade: float = 10.0,
+                 feedforward_file: str = '',
+                 feedforward_load_on_start: bool = False,
+                 feedforward_save_on_finish: bool = False):
         self.sample_rate = sample_rate
         self.output_sample_rate = output_sample_rate
         self.sweep_type = sweep_type
@@ -183,6 +215,15 @@ class SineForceControlParameters(AbstractMetadata):
         self.max_drive_step_v = max_drive_step_v
         self.ramp_time_s = ramp_time_s
         self.pre_dwell_time_s = pre_dwell_time_s
+        self.feedforward_enabled = feedforward_enabled
+        self.feedforward_learning_rate = feedforward_learning_rate
+        self.feedforward_min_v = feedforward_min_v
+        self.feedforward_max_v = feedforward_max_v
+        self.feedforward_trim_gain_max = feedforward_trim_gain_max
+        self.feedforward_bins_per_decade = feedforward_bins_per_decade
+        self.feedforward_file = feedforward_file
+        self.feedforward_load_on_start = feedforward_load_on_start
+        self.feedforward_save_on_finish = feedforward_save_on_finish
 
     def store_to_netcdf(self, netcdf_group_handle: nc4._netCDF4.Group):
         """Stores parameters and creates the diagnostic time-series variables."""
@@ -209,6 +250,15 @@ class SineForceControlParameters(AbstractMetadata):
         netcdf_group_handle.max_drive_step_v = self.max_drive_step_v
         netcdf_group_handle.ramp_time_s = self.ramp_time_s
         netcdf_group_handle.pre_dwell_time_s = self.pre_dwell_time_s
+        netcdf_group_handle.feedforward_enabled = 1 if self.feedforward_enabled else 0
+        netcdf_group_handle.feedforward_learning_rate = self.feedforward_learning_rate
+        netcdf_group_handle.feedforward_min_v = self.feedforward_min_v
+        netcdf_group_handle.feedforward_max_v = self.feedforward_max_v
+        netcdf_group_handle.feedforward_trim_gain_max = self.feedforward_trim_gain_max
+        netcdf_group_handle.feedforward_bins_per_decade = self.feedforward_bins_per_decade
+        netcdf_group_handle.feedforward_file = self.feedforward_file
+        netcdf_group_handle.feedforward_load_on_start = 1 if self.feedforward_load_on_start else 0
+        netcdf_group_handle.feedforward_save_on_finish = 1 if self.feedforward_save_on_finish else 0
         netcdf_group_handle.createDimension('control_updates', None)
         netcdf_group_handle.createVariable('time', 'f8', ('control_updates',))
         netcdf_group_handle.createVariable('instantaneous_frequency', 'f8', ('control_updates',))
@@ -219,6 +269,16 @@ class SineForceControlParameters(AbstractMetadata):
         netcdf_group_handle.createVariable('controller_state', str, ('control_updates',))
         netcdf_group_handle.createVariable('controller_saturated', 'i1', ('control_updates',))
         netcdf_group_handle.createVariable('estimator_valid', 'i1', ('control_updates',))
+        # Feedforward learning diagnostics (see components/feedforward_map.py).
+        # feedforward_value/feedback_correction_pct are NaN throughout when
+        # feedforward_enabled=0 -- the fast loop then drives
+        # drive_amplitude_command directly, as before this feature existed.
+        netcdf_group_handle.createVariable('feedforward_value', 'f8', ('control_updates',))
+        netcdf_group_handle.createVariable('feedback_correction_pct', 'f8', ('control_updates',))
+        netcdf_group_handle.createVariable('feedforward_confidence', 'f8', ('control_updates',))
+        netcdf_group_handle.createVariable('feedforward_learning_applied', 'i1', ('control_updates',))
+        netcdf_group_handle.createVariable('sweep_direction', str, ('control_updates',))
+        netcdf_group_handle.createVariable('sweep_number', 'i4', ('control_updates',))
 
     @classmethod
     def from_ui(cls, ui: 'SineForceControlUI') -> 'SineForceControlParameters':
@@ -250,6 +310,15 @@ class SineForceControlParameters(AbstractMetadata):
             max_drive_step_v=widget.max_drive_step_selector.value(),
             ramp_time_s=widget.ramp_time_selector.value(),
             pre_dwell_time_s=widget.pre_dwell_time_selector.value(),
+            feedforward_enabled=widget.feedforward_enabled_checkbox.isChecked(),
+            feedforward_learning_rate=widget.feedforward_learning_rate_selector.value(),
+            feedforward_min_v=widget.feedforward_min_selector.value(),
+            feedforward_max_v=widget.feedforward_max_selector.value(),
+            feedforward_trim_gain_max=widget.feedforward_trim_gain_max_selector.value(),
+            feedforward_bins_per_decade=widget.feedforward_bins_per_decade_selector.value(),
+            feedforward_file=widget.feedforward_file_selector.text(),
+            feedforward_load_on_start=widget.feedforward_load_on_start_checkbox.isChecked(),
+            feedforward_save_on_finish=widget.feedforward_save_on_finish_checkbox.isChecked(),
         )
 
 
@@ -297,6 +366,10 @@ class SineForceControlUI(AbstractUI):
             self.update_tracking_bandwidth_enabled)
         self.update_tracking_bandwidth_enabled(
             self.definition_widget.adaptive_tracking_bandwidth_checkbox.isChecked())
+        self.definition_widget.feedforward_enabled_checkbox.toggled.connect(
+            self.update_feedforward_enabled)
+        self.update_feedforward_enabled(
+            self.definition_widget.feedforward_enabled_checkbox.isChecked())
         plot_item = self.run_widget.force_plot.getPlotItem()
         plot_item.showGrid(True, True, 0.25)
         plot_item.enableAutoRange()
@@ -309,6 +382,7 @@ class SineForceControlUI(AbstractUI):
         self.run_widget.select_file_button.clicked.connect(self.select_file)
         self.run_widget.start_test_button.clicked.connect(self.start_control)
         self.run_widget.stop_test_button.clicked.connect(self.stop_control)
+        self.definition_widget.feedforward_file_button.clicked.connect(self.select_feedforward_file)
 
     def update_sweep_rate_units(self, sweep_type_text: str):
         if sweep_type_text == 'Linear':
@@ -320,6 +394,14 @@ class SineForceControlUI(AbstractUI):
         self.definition_widget.tracking_bandwidth_selector.setEnabled(not adaptive_checked)
         self.definition_widget.tracking_cycles_selector.setEnabled(adaptive_checked)
 
+    def update_feedforward_enabled(self, enabled: bool):
+        for widget_name in ('feedforward_learning_rate_selector', 'feedforward_bins_per_decade_selector',
+                             'feedforward_min_selector', 'feedforward_max_selector',
+                             'feedforward_trim_gain_max_selector', 'feedforward_file_selector',
+                             'feedforward_file_button', 'feedforward_load_on_start_checkbox',
+                             'feedforward_save_on_finish_checkbox'):
+            getattr(self.definition_widget, widget_name).setEnabled(enabled)
+
     def select_file(self):
         filename, file_filter = QtWidgets.QFileDialog.getSaveFileName(
             self.run_widget, 'Select NetCDF File to Save Sine Force Control Data',
@@ -327,6 +409,14 @@ class SineForceControlUI(AbstractUI):
         if filename == '':
             return
         self.run_widget.data_file_selector.setText(filename)
+
+    def select_feedforward_file(self):
+        filename, file_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self.definition_widget, 'Select Feedforward Map File (JSON) to Load/Save',
+            filter='JSON File (*.json)', options=QtWidgets.QFileDialog.DontConfirmOverwrite)
+        if filename == '':
+            return
+        self.definition_widget.feedforward_file_selector.setText(filename)
 
     def initialize_data_acquisition(self, data_acquisition_parameters: DataAcquisitionParameters):
         self.log('Initializing Data Acquisition')
@@ -361,6 +451,14 @@ class SineForceControlUI(AbstractUI):
             raise ValueError('Initial Drive must be a small positive value '
                               '(a pure multiplicative controller cannot move '
                               'away from a zero starting amplitude).')
+        if data.feedforward_enabled:
+            if data.feedforward_min_v >= data.feedforward_max_v:
+                raise ValueError('Feedforward Max must be greater than Feedforward Min!')
+            if not (data.feedforward_min_v <= data.initial_drive_v <= data.feedforward_max_v):
+                raise ValueError('Initial Drive must lie within [Feedforward Min, Feedforward Max] -- '
+                                  'it seeds the feedforward map fallback estimate.')
+            if data.feedforward_trim_gain_max <= 1.0:
+                raise ValueError('Max Trim Ratio must be greater than 1.0!')
         # Warn (but don't block) if the control loop updates faster than the
         # tracking filter can settle -- the controller would then react to a
         # not-yet-settled amplitude estimate, causing the drive/force
@@ -427,6 +525,24 @@ class SineForceControlUI(AbstractUI):
         self.definition_widget.max_drive_step_selector.setValue(group.max_drive_step_v)
         self.definition_widget.ramp_time_selector.setValue(group.ramp_time_s)
         self.definition_widget.pre_dwell_time_selector.setValue(group.pre_dwell_time_s)
+        self.definition_widget.feedforward_enabled_checkbox.setChecked(
+            bool(getattr(group, 'feedforward_enabled', 0)))
+        self.definition_widget.feedforward_learning_rate_selector.setValue(
+            float(getattr(group, 'feedforward_learning_rate', 0.2)))
+        self.definition_widget.feedforward_min_selector.setValue(
+            float(getattr(group, 'feedforward_min_v', 0.05)))
+        self.definition_widget.feedforward_max_selector.setValue(
+            float(getattr(group, 'feedforward_max_v', 1.25)))
+        self.definition_widget.feedforward_trim_gain_max_selector.setValue(
+            float(getattr(group, 'feedforward_trim_gain_max', 3.0)))
+        self.definition_widget.feedforward_bins_per_decade_selector.setValue(
+            float(getattr(group, 'feedforward_bins_per_decade', 10.0)))
+        self.definition_widget.feedforward_file_selector.setText(
+            str(getattr(group, 'feedforward_file', '')))
+        self.definition_widget.feedforward_load_on_start_checkbox.setChecked(
+            bool(getattr(group, 'feedforward_load_on_start', 0)))
+        self.definition_widget.feedforward_save_on_finish_checkbox.setChecked(
+            bool(getattr(group, 'feedforward_save_on_finish', 0)))
 
     def create_netcdf_file(self, filename):
         self.netcdf_handle = nc4.Dataset(filename, 'w', format='NETCDF4', clobber=True)
@@ -463,12 +579,18 @@ class SineForceControlUI(AbstractUI):
         message, data = queue_data
         if message == 'diagnostic_update':
             (t, frequency, target, measured, relative_error, drive_amplitude,
-             state, saturated, valid) = data
+             state, saturated, valid, feedforward_value, feedback_correction_pct,
+             feedforward_confidence, learning_applied, sweep_direction, sweep_number) = data
             self.run_widget.frequency_display.setValue(frequency)
             self.run_widget.drive_amplitude_display.setValue(drive_amplitude)
             self.run_widget.state_display.setText(state)
             self.run_widget.saturated_checkbox.setChecked(bool(saturated))
             self.run_widget.estimator_valid_checkbox.setChecked(bool(valid))
+            self.run_widget.sweep_info_display.setText('#{:} ({:})'.format(sweep_number, sweep_direction))
+            if np.isfinite(feedforward_value):
+                self.run_widget.feedforward_value_display.setValue(feedforward_value)
+            if np.isfinite(feedback_correction_pct):
+                self.run_widget.feedback_correction_display.setValue(feedback_correction_pct)
             if valid:
                 self.run_widget.measured_force_display.setValue(measured)
                 self.run_widget.relative_error_display.setValue(relative_error * 100.0)
@@ -489,6 +611,12 @@ class SineForceControlUI(AbstractUI):
                 group.variables['controller_state'][i] = state
                 group.variables['controller_saturated'][i] = 1 if saturated else 0
                 group.variables['estimator_valid'][i] = 1 if valid else 0
+                group.variables['feedforward_value'][i] = feedforward_value
+                group.variables['feedback_correction_pct'][i] = feedback_correction_pct
+                group.variables['feedforward_confidence'][i] = feedforward_confidence
+                group.variables['feedforward_learning_applied'][i] = 1 if learning_applied else 0
+                group.variables['sweep_direction'][i] = sweep_direction
+                group.variables['sweep_number'][i] = sweep_number
         elif message == 'aborted':
             self.acquiring = False
             self.run_widget.state_display.setText('ABORTED: {:}'.format(data))
@@ -532,6 +660,15 @@ class SineForceControlUI(AbstractUI):
             ('Max Drive Step', 'V peak per update'),
             ('Ramp Time', 's'),
             ('Pre-Sweep Dwell Time', 's'),
+            ('Feedforward Enabled', '0 or 1 -- layer a learned frequency-dependent feedforward map on top of the fast loop'),
+            ('Feedforward Learning Rate', '0 < rate <= 1, steady-state per-bin learning rate'),
+            ('Feedforward Min', 'V peak, hard lower clamp on learned values'),
+            ('Feedforward Max', 'V peak, hard upper clamp on learned values'),
+            ('Feedforward Max Trim Ratio', '> 1.0, max multiplicative trim the fast loop may apply on top of the feedforward value'),
+            ('Feedforward Bins Per Decade', 'log-frequency resolution of the learned curve'),
+            ('Feedforward Map File', 'Path to JSON file for load/save, or empty for none'),
+            ('Feedforward Load On Start', '0 or 1'),
+            ('Feedforward Save On Finish', '0 or 1'),
         ]
         for i, (label, note) in enumerate(rows, start=2):
             worksheet.cell(i, 1, label)
@@ -563,6 +700,15 @@ class SineForceControlUI(AbstractUI):
         self.definition_widget.max_drive_step_selector.setValue(float(worksheet.cell(21, 2).value))
         self.definition_widget.ramp_time_selector.setValue(float(worksheet.cell(22, 2).value))
         self.definition_widget.pre_dwell_time_selector.setValue(float(worksheet.cell(23, 2).value))
+        self.definition_widget.feedforward_enabled_checkbox.setChecked(bool(int(worksheet.cell(24, 2).value)))
+        self.definition_widget.feedforward_learning_rate_selector.setValue(float(worksheet.cell(25, 2).value))
+        self.definition_widget.feedforward_min_selector.setValue(float(worksheet.cell(26, 2).value))
+        self.definition_widget.feedforward_max_selector.setValue(float(worksheet.cell(27, 2).value))
+        self.definition_widget.feedforward_trim_gain_max_selector.setValue(float(worksheet.cell(28, 2).value))
+        self.definition_widget.feedforward_bins_per_decade_selector.setValue(float(worksheet.cell(29, 2).value))
+        self.definition_widget.feedforward_file_selector.setText(str(worksheet.cell(30, 2).value or ''))
+        self.definition_widget.feedforward_load_on_start_checkbox.setChecked(bool(int(worksheet.cell(31, 2).value)))
+        self.definition_widget.feedforward_save_on_finish_checkbox.setChecked(bool(int(worksheet.cell(32, 2).value)))
 
 
 class SineForceControlEnvironment(AbstractEnvironment):
@@ -611,6 +757,20 @@ class SineForceControlEnvironment(AbstractEnvironment):
         self.last_result = None
         self._last_status = ControllerStatus.OK
 
+        # Feedforward learning layer (see components/feedforward_map.py).
+        # feedforward_map stays None whenever feedforward is disabled --
+        # every code path below that touches it is guarded on that, so a
+        # disabled/misconfigured feedforward layer cannot affect the fast
+        # loop at all.
+        self.feedforward_map = None
+        self.total_drive_amplitude = 0.0
+        self._last_feedforward_value = float('nan')
+        self._last_feedback_correction_pct = float('nan')
+        self._last_feedforward_confidence = float('nan')
+        self._last_learning_applied = False
+        self._last_sweep_direction = 'up'
+        self._last_sweep_number = 1
+
     def initialize_data_acquisition_parameters(self, data_acquisition_parameters: DataAcquisitionParameters):
         self.log('Initializing Data Acquisition Parameters')
         self.data_acquisition_parameters = data_acquisition_parameters
@@ -657,12 +817,52 @@ class SineForceControlEnvironment(AbstractEnvironment):
         self.estimator = ForceTrackingEstimator(
             sample_rate=environment_parameters.sample_rate,
             tracking_bandwidth_hz=initial_tracking_bandwidth_hz)
-        self.controller = ForceAmplitudeController(
-            alpha=environment_parameters.controller_alpha,
-            force_floor=environment_parameters.force_floor,
-            max_drive_amplitude=environment_parameters.max_drive_v,
-            max_amplitude_step=environment_parameters.max_drive_step_v,
-            initial_drive_amplitude=environment_parameters.initial_drive_v)
+
+        if environment_parameters.feedforward_enabled:
+            # Feedforward mode: u_total = A_FF(f) * g. `self.controller` is
+            # the *same*, completely unmodified ForceAmplitudeController
+            # class, reused for the trim role -- reparametrized to regulate
+            # a dimensionless gain g (centered on 1.0) instead of a voltage.
+            # This is mathematically equivalent to the disabled-feedforward
+            # case with the roles of "state" and "external multiplier" swapped
+            # (see components/feedforward_map.py module docstring for why a
+            # multiplicative composition is what's actually consistent with
+            # this controller's own multiplicative/log-amplitude update law,
+            # and why an additive trim starting at 0 cannot work with it).
+            self.feedforward_map = FeedforwardMap(
+                f_min=min(environment_parameters.f_start, environment_parameters.f_stop),
+                f_max=max(environment_parameters.f_start, environment_parameters.f_stop),
+                initial_estimate=environment_parameters.initial_drive_v,
+                value_min=environment_parameters.feedforward_min_v,
+                value_max=environment_parameters.feedforward_max_v,
+                bins_per_decade=environment_parameters.feedforward_bins_per_decade,
+                learning_rate=environment_parameters.feedforward_learning_rate,
+                max_relative_step_per_update=FEEDFORWARD_MAX_RELATIVE_STEP_PER_UPDATE,
+                outlier_reject_ratio=FEEDFORWARD_OUTLIER_REJECT_RATIO,
+                outlier_reject_min_observations=FEEDFORWARD_OUTLIER_REJECT_MIN_OBSERVATIONS,
+                max_observations_cap=FEEDFORWARD_MAX_OBSERVATIONS_CAP,
+                separate_direction=FEEDFORWARD_SEPARATE_DIRECTION)
+            if environment_parameters.feedforward_load_on_start and environment_parameters.feedforward_file:
+                try:
+                    self.feedforward_map.load(environment_parameters.feedforward_file)
+                    self.log('Loaded feedforward map from {:}'.format(environment_parameters.feedforward_file))
+                except (OSError, ValueError, KeyError) as exc:
+                    self.log('Could not load feedforward map ({:}) -- starting from an empty map: {:}'.format(
+                        environment_parameters.feedforward_file, exc))
+            self.controller = ForceAmplitudeController(
+                alpha=environment_parameters.controller_alpha,
+                force_floor=environment_parameters.force_floor,
+                max_drive_amplitude=environment_parameters.feedforward_trim_gain_max,
+                max_amplitude_step=FEEDFORWARD_TRIM_GAIN_MAX_STEP,
+                initial_drive_amplitude=1.0)
+        else:
+            self.feedforward_map = None
+            self.controller = ForceAmplitudeController(
+                alpha=environment_parameters.controller_alpha,
+                force_floor=environment_parameters.force_floor,
+                max_drive_amplitude=environment_parameters.max_drive_v,
+                max_amplitude_step=environment_parameters.max_drive_step_v,
+                initial_drive_amplitude=environment_parameters.initial_drive_v)
         self.target_spec = ConstantForceTarget(environment_parameters.target_force, force_unit='peak')
 
         self.control_update_samples = max(1, round(
@@ -677,6 +877,68 @@ class SineForceControlEnvironment(AbstractEnvironment):
         self.last_frequency = environment_parameters.f_start
         self.last_result = None
         self._last_status = ControllerStatus.OK
+        self.total_drive_amplitude = environment_parameters.initial_drive_v
+        self._last_feedforward_value = float('nan')
+        self._last_feedback_correction_pct = float('nan')
+        self._last_feedforward_confidence = float('nan')
+        self._last_learning_applied = False
+        self._last_sweep_direction = environment_parameters.direction
+        self._last_sweep_number = 1
+
+    def _update_feedforward_and_compose(self, ctrl_result):
+        """Composes ``self.total_drive_amplitude`` (the actual command sent
+        to the shaker) from this control update's ``ctrl_result``, and --
+        when feedforward is enabled -- learns from it.
+
+        With feedforward disabled, ``ctrl_result.drive_amplitude`` already
+        *is* the drive amplitude in volts (unchanged fast-loop behavior);
+        this method's clip/slew step is then a no-op (the controller already
+        enforces the identical limits internally -- see
+        ``initialize_environment_test_parameters``).
+
+        With feedforward enabled, ``ctrl_result.drive_amplitude`` is instead
+        the dimensionless trim gain ``g``, and
+        ``u_total = A_FF(f) * g`` (see components/feedforward_map.py). The
+        sweep leg/direction is read from ``input_phase_generator`` (the same
+        generator already used to demodulate the incoming force block at
+        this same frequency -- see module docstring on input/output phase
+        generator pairing) so learning is tagged consistently with the
+        frequency it actually observed.
+        """
+        frequency = self.last_frequency
+        leg, direction = self.input_phase_generator.leg_and_direction(self.elapsed_time)
+        self._last_sweep_direction = direction
+        self._last_sweep_number = leg + 1
+
+        if self.feedforward_map is None:
+            self.total_drive_amplitude = ctrl_result.drive_amplitude
+            self._last_feedforward_value = float('nan')
+            self._last_feedback_correction_pct = float('nan')
+            self._last_feedforward_confidence = float('nan')
+            self._last_learning_applied = False
+        else:
+            ff_value = self.feedforward_map.get(frequency, direction=direction)
+            trim_gain = ctrl_result.drive_amplitude
+            raw_total = ff_value * trim_gain
+
+            # Learn from this update's *composed* command -- i.e. what the
+            # fast loop currently believes is required to hit the target
+            # force -- only when that belief is actually trustworthy (fast
+            # loop not held/saturated, tracking estimator settled -- see
+            # ControllerStatus and ForceTrackingResult.valid).
+            trust = ctrl_result.status is ControllerStatus.OK
+            learn_result = self.feedforward_map.update(
+                frequency, observed_value=raw_total, trust=trust, direction=direction)
+
+            clipped = min(max(raw_total, 0.0), self.environment_parameters.max_drive_v)
+            max_step = self.environment_parameters.max_drive_step_v
+            delta = min(max(clipped - self.total_drive_amplitude, -max_step), max_step)
+            self.total_drive_amplitude = self.total_drive_amplitude + delta
+
+            self._last_feedforward_value = ff_value
+            self._last_feedback_correction_pct = (trim_gain - 1.0) * 100.0
+            self._last_feedforward_confidence = self.feedforward_map.confidence(frequency, direction=direction)
+            self._last_learning_applied = learn_result.updated
 
     def _publish_diagnostics(self, frequency):
         valid = self.last_result.valid if self.last_result is not None else False
@@ -688,7 +950,10 @@ class SineForceControlEnvironment(AbstractEnvironment):
         self.queue_container.gui_update_queue.put((self.environment_name, (
             'diagnostic_update',
             (self.elapsed_time, frequency, target, measured, relative_error,
-             self.controller.drive_amplitude, state_str, saturated, valid))))
+             self.total_drive_amplitude, state_str, saturated, valid,
+             self._last_feedforward_value, self._last_feedback_correction_pct,
+             self._last_feedforward_confidence, self._last_learning_applied,
+             self._last_sweep_direction, self._last_sweep_number))))
 
     def _trigger_abort(self, reason: str):
         self.log('SAFETY ABORT: {:}'.format(reason))
@@ -753,10 +1018,11 @@ class SineForceControlEnvironment(AbstractEnvironment):
                 measured = self.last_result.amplitude if self.last_result.valid else None
                 ctrl_result = self.controller.update(target, measured, self.last_result.valid)
                 self._last_status = ctrl_result.status
-                if self.controller.drive_amplitude > self.environment_parameters.abort_drive_v:
+                self._update_feedforward_and_compose(ctrl_result)
+                if self.total_drive_amplitude > self.environment_parameters.abort_drive_v:
                     self._trigger_abort(
                         'Commanded drive amplitude {:.4f} V exceeded abort limit {:.4f} V'.format(
-                            self.controller.drive_amplitude, self.environment_parameters.abort_drive_v))
+                            self.total_drive_amplitude, self.environment_parameters.abort_drive_v))
                     return
             self._publish_diagnostics(self.last_frequency)
 
@@ -764,7 +1030,7 @@ class SineForceControlEnvironment(AbstractEnvironment):
         if self.queue_container.data_out_queue.empty():
             n_out = self.data_acquisition_parameters.samples_per_write
             samples, freq_out, phase_out = self.output_sweep_generator.generate_block(
-                n_out, drive_amplitude=self.controller.drive_amplitude)
+                n_out, drive_amplitude=self.total_drive_amplitude)
 
             gate = self._advance_gate(n_out)
             output_block = samples * gate
@@ -821,6 +1087,14 @@ class SineForceControlEnvironment(AbstractEnvironment):
 
     def shutdown(self):
         self.log('Shutting Down Sine Force Control')
+        if (self.feedforward_map is not None
+                and self.environment_parameters.feedforward_save_on_finish
+                and self.environment_parameters.feedforward_file):
+            try:
+                self.feedforward_map.save(self.environment_parameters.feedforward_file)
+                self.log('Saved feedforward map to {:}'.format(self.environment_parameters.feedforward_file))
+            except OSError as exc:
+                self.log('Could not save feedforward map: {:}'.format(exc))
         self.queue_container.environment_command_queue.flush(self.environment_name)
         self.queue_container.gui_update_queue.put((self.environment_name, ('finished', None)))
         self.startup = True

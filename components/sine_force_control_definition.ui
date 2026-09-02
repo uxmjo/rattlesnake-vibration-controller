@@ -589,6 +589,201 @@
     </widget>
    </item>
    <item>
+    <widget class="QGroupBox" name="feedforward_groupbox">
+     <property name="title">
+      <string>Feedforward Learning</string>
+     </property>
+     <layout class="QGridLayout" name="feedforward_layout">
+      <item row="0" column="0">
+       <widget class="QCheckBox" name="feedforward_enabled_checkbox">
+        <property name="toolTip">
+         <string>If checked, a slow-learning frequency-dependent feedforward map A_FF(f) is layered on top of the existing fast force loop: commanded drive = A_FF(f) * trim, where trim (initially 1.0) is produced by the same fast-loop control law as always, now regulating a small residual instead of the full drive amplitude. A_FF(f) is learned online from the fast loop's own converged output, across all sweeps (not reset between sweep legs or on direction changes). If unchecked, behavior is identical to the fast loop running alone (previous behavior).</string>
+        </property>
+        <property name="text">
+         <string>Enable Feedforward Learning</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QLabel" name="feedforward_learning_rate_label">
+        <property name="text">
+         <string>Learning Rate</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="2">
+       <widget class="QDoubleSpinBox" name="feedforward_learning_rate_selector">
+        <property name="toolTip">
+         <string>Steady-state fraction of the observed error blended into a frequency bin's learned value per control update, once that bin has several observations (a brand-new bin learns faster than this so it does not take many sweeps to form an initial estimate). Small = slow/stable learning over many sweeps; large = faster but noisier. Independent of the fast loop's own Controller Alpha.</string>
+        </property>
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="minimum">
+         <double>0.010000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>1.000000000000000</double>
+        </property>
+        <property name="singleStep">
+         <double>0.050000000000000</double>
+        </property>
+        <property name="value">
+         <double>0.200000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="3">
+       <widget class="QLabel" name="feedforward_bins_per_decade_label">
+        <property name="text">
+         <string>Bins / Decade</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="4">
+       <widget class="QDoubleSpinBox" name="feedforward_bins_per_decade_selector">
+        <property name="toolTip">
+         <string>Logarithmic frequency resolution of the learned feedforward curve. Higher = can resolve narrower resonances but each bin is revisited less often per sweep (noisier); lower = smoother but coarser.</string>
+        </property>
+        <property name="decimals">
+         <number>1</number>
+        </property>
+        <property name="minimum">
+         <double>1.000000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>100.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>10.000000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="feedforward_min_label">
+        <property name="text">
+         <string>Feedforward Min</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QDoubleSpinBox" name="feedforward_min_selector">
+        <property name="toolTip">
+         <string>Hard lower clamp on any learned feedforward value -- the map can never learn a value below this, regardless of what the fast loop's trim requests.</string>
+        </property>
+        <property name="suffix">
+         <string> V peak</string>
+        </property>
+        <property name="decimals">
+         <number>4</number>
+        </property>
+        <property name="minimum">
+         <double>0.000100000000000</double>
+        </property>
+        <property name="maximum">
+         <double>100.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>0.050000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="2">
+       <widget class="QLabel" name="feedforward_max_label">
+        <property name="text">
+         <string>Feedforward Max</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="3">
+       <widget class="QDoubleSpinBox" name="feedforward_max_selector">
+        <property name="toolTip">
+         <string>Hard upper clamp on any learned feedforward value -- should normally match Max Drive (Control Limit) above.</string>
+        </property>
+        <property name="suffix">
+         <string> V peak</string>
+        </property>
+        <property name="decimals">
+         <number>4</number>
+        </property>
+        <property name="minimum">
+         <double>0.000100000000000</double>
+        </property>
+        <property name="maximum">
+         <double>100.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>1.250000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="4">
+       <widget class="QLabel" name="feedforward_trim_gain_max_label">
+        <property name="text">
+         <string>Max Trim Ratio</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="5">
+       <widget class="QDoubleSpinBox" name="feedforward_trim_gain_max_selector">
+        <property name="toolTip">
+         <string>Limits how far the fast loop's trim may multiplicatively scale the feedforward value (e.g. 3.0 = trim allowed to command up to 3x or down to 1/3x the current A_FF(f)). Generous headroom is needed early on (before A_FF has learned anything useful) and should shrink in practice as learning converges. This is independent of, and in addition to, Max Drive / Abort Drive below, which remain hard ceilings on the final composed command.</string>
+        </property>
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="minimum">
+         <double>1.010000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>100.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>3.000000000000000</double>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0" colspan="2">
+       <widget class="QLineEdit" name="feedforward_file_selector">
+        <property name="toolTip">
+         <string>Optional file (JSON) to load a previously learned feedforward map from at start, and/or save the learned map to when the test finishes. Leave empty to disable persistence.</string>
+        </property>
+        <property name="readOnly">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="2">
+       <widget class="QPushButton" name="feedforward_file_button">
+        <property name="text">
+         <string>Select Map File</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="3">
+       <widget class="QCheckBox" name="feedforward_load_on_start_checkbox">
+        <property name="toolTip">
+         <string>If checked and the map file above exists, load it before the test starts and continue learning from it (instead of starting from an empty map).</string>
+        </property>
+        <property name="text">
+         <string>Load on Start</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="4">
+       <widget class="QCheckBox" name="feedforward_save_on_finish_checkbox">
+        <property name="toolTip">
+         <string>If checked, save the learned feedforward map to the file above when the test finishes normally (not on abort).</string>
+        </property>
+        <property name="text">
+         <string>Save on Finish</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <spacer name="definition_spacer">
      <property name="orientation">
       <enum>Qt::Vertical</enum>

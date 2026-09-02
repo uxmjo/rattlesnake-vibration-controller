@@ -256,6 +256,84 @@
           </property>
          </widget>
         </item>
+        <item row="6" column="0">
+         <widget class="QLabel" name="sweep_info_label">
+          <property name="text">
+           <string>Sweep</string>
+          </property>
+         </widget>
+        </item>
+        <item row="6" column="1">
+         <widget class="QLineEdit" name="sweep_info_display">
+          <property name="readOnly">
+           <bool>true</bool>
+          </property>
+          <property name="toolTip">
+           <string>Current sweep leg number and direction (up/down).</string>
+          </property>
+         </widget>
+        </item>
+        <item row="7" column="0">
+         <widget class="QLabel" name="feedforward_value_label">
+          <property name="text">
+           <string>Feedforward Value</string>
+          </property>
+         </widget>
+        </item>
+        <item row="7" column="1">
+         <widget class="QDoubleSpinBox" name="feedforward_value_display">
+          <property name="readOnly">
+           <bool>true</bool>
+          </property>
+          <property name="buttonSymbols">
+           <enum>QAbstractSpinBox::NoButtons</enum>
+          </property>
+          <property name="toolTip">
+           <string>Current learned feedforward drive amplitude A_FF(f) at the instantaneous frequency (interpolated). NaN if Feedforward Learning is disabled.</string>
+          </property>
+          <property name="suffix">
+           <string> V peak</string>
+          </property>
+          <property name="decimals">
+           <number>4</number>
+          </property>
+          <property name="maximum">
+           <double>100.000000000000000</double>
+          </property>
+         </widget>
+        </item>
+        <item row="8" column="0">
+         <widget class="QLabel" name="feedback_correction_label">
+          <property name="text">
+           <string>Feedback Correction</string>
+          </property>
+         </widget>
+        </item>
+        <item row="8" column="1">
+         <widget class="QDoubleSpinBox" name="feedback_correction_display">
+          <property name="readOnly">
+           <bool>true</bool>
+          </property>
+          <property name="buttonSymbols">
+           <enum>QAbstractSpinBox::NoButtons</enum>
+          </property>
+          <property name="toolTip">
+           <string>Remaining trim the fast loop is applying on top of the feedforward value, as a percentage (total = feedforward * (1 + this/100)). Should shrink toward 0% as the feedforward map learns. NaN if Feedforward Learning is disabled.</string>
+          </property>
+          <property name="suffix">
+           <string> %</string>
+          </property>
+          <property name="decimals">
+           <number>1</number>
+          </property>
+          <property name="minimum">
+           <double>-1000.000000000000000</double>
+          </property>
+          <property name="maximum">
+           <double>1000.000000000000000</double>
+          </property>
+         </widget>
+        </item>
        </layout>
       </widget>
      </item>

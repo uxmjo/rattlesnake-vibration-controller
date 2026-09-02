@@ -34,6 +34,18 @@ def load_diagnostics(filename: str, group_name: str = None):
         'saturated': group.variables['controller_saturated'][:].filled(0).astype(bool),
         'valid': group.variables['estimator_valid'][:].filled(0).astype(bool),
     }
+    # Feedforward learning diagnostics (see components/feedforward_map.py) --
+    # only present in files written after that feature was added, so this
+    # stays backward compatible with older diagnostics files.
+    has_feedforward = 'feedforward_value' in group.variables
+    data['has_feedforward'] = has_feedforward
+    if has_feedforward:
+        data['feedforward_value'] = group.variables['feedforward_value'][:].filled(np.nan)
+        data['feedback_correction_pct'] = group.variables['feedback_correction_pct'][:].filled(np.nan)
+        data['feedforward_confidence'] = group.variables['feedforward_confidence'][:].filled(np.nan)
+        data['learning_applied'] = group.variables['feedforward_learning_applied'][:].filled(0).astype(bool)
+        data['sweep_direction'] = np.array(group.variables['sweep_direction'][:])
+        data['sweep_number'] = group.variables['sweep_number'][:].filled(0)
     metadata = {
         'target_force': group.target_force,
         'max_drive_v': group.max_drive_v,
@@ -41,6 +53,7 @@ def load_diagnostics(filename: str, group_name: str = None):
         'sweep_type': group.sweep_type,
         'f_start': group.f_start,
         'f_stop': group.f_stop,
+        'feedforward_enabled': bool(getattr(group, 'feedforward_enabled', 0)),
     }
     dataset.close()
     return data, metadata, group_name
@@ -102,7 +115,63 @@ def plot_diagnostics(data, metadata, group_name):
     ax2.legend()
     ax2.grid(True, alpha=0.3)
 
+    if data.get('has_feedforward'):
+        plot_feedforward_learning(data, group_name)
+
     plt.show()
+
+
+def plot_feedforward_learning(data, group_name):
+    """Third figure: feedforward-learning progress (see
+    components/feedforward_map.py) -- one line per sweep leg for both the
+    learned command and the remaining feedback correction, colored by leg
+    so convergence over successive sweeps is visible directly, plus the
+    learned-value confidence."""
+    sweep_number = data['sweep_number']
+    legs = np.unique(sweep_number)
+    colors = plt.cm.viridis(np.linspace(0, 0.9, max(len(legs), 1)))
+
+    fig, axes = plt.subplots(3, 1, sharex=True, figsize=(9, 9))
+    fig.suptitle('Feedforward Learning Progress -- {:}'.format(group_name))
+
+    ax = axes[0]
+    for color, leg in zip(colors, legs):
+        m = (sweep_number == leg) & np.isfinite(data['feedforward_value'])
+        if not np.any(m):
+            continue
+        direction = data['sweep_direction'][m][0] if np.any(m) else ''
+        order = np.argsort(data['frequency'][m])
+        ax.plot(data['frequency'][m][order], data['feedforward_value'][m][order],
+                '.', color=color, markersize=2,
+                label='Leg {:} ({:})'.format(leg, direction))
+    ax.set_xscale('log')
+    ax.set_ylabel('Feedforward A_FF(f)\n(V peak)')
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.3, which='both')
+
+    ax = axes[1]
+    for color, leg in zip(colors, legs):
+        m = (sweep_number == leg) & np.isfinite(data['feedback_correction_pct'])
+        if not np.any(m):
+            continue
+        order = np.argsort(data['frequency'][m])
+        ax.plot(data['frequency'][m][order], data['feedback_correction_pct'][m][order],
+                '.', color=color, markersize=2)
+    ax.axhline(0.0, color='k', linewidth=0.7)
+    ax.set_xscale('log')
+    ax.set_ylabel('Feedback\nCorrection (%)')
+    ax.set_title('Should shrink toward 0% leg-over-leg as the feedforward map learns', fontsize=9)
+    ax.grid(True, alpha=0.3, which='both')
+
+    ax = axes[2]
+    ax.plot(data['frequency'], data['feedforward_confidence'], '.', color='tab:purple', markersize=2)
+    ax.set_xscale('log')
+    ax.set_ylabel('Feedforward\nConfidence')
+    ax.set_xlabel('Frequency (Hz)')
+    ax.set_ylim(-0.05, 1.05)
+    ax.grid(True, alpha=0.3, which='both')
+
+    fig.tight_layout()
 
 
 if __name__ == '__main__':
