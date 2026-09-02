@@ -239,3 +239,69 @@ def test_negative_pre_dwell_time_raises():
     with pytest.raises(ValueError):
         SineSweepGenerator(sample_rate=1000.0, sweep_type='linear', f_start=10.0,
                            f_stop=20.0, sweep_rate=10.0, pre_dwell_time=-1.0)
+
+
+def test_negative_num_sweeps_raises():
+    with pytest.raises(ValueError):
+        SineSweepGenerator(sample_rate=1000.0, sweep_type='linear', f_start=10.0,
+                           f_stop=20.0, sweep_rate=10.0, repeat=True, num_sweeps=-1)
+
+
+def test_num_sweeps_zero_is_backward_compatible_unlimited_repeat():
+    """num_sweeps=0 (the default) must behave exactly like the old
+    unlimited repeat=True."""
+    fs = 2000.0
+    kwargs = dict(sample_rate=fs, sweep_type='linear', f_start=10.0, f_stop=20.0,
+                  sweep_rate=100.0, repeat=True)
+    gen_default = SineSweepGenerator(**kwargs)
+    gen_explicit = SineSweepGenerator(num_sweeps=0, **kwargs)
+    s1, f1, p1 = gen_default.generate_block(700, drive_amplitude=1.0)
+    s2, f2, p2 = gen_explicit.generate_block(700, drive_amplitude=1.0)
+    np.testing.assert_allclose(f1, f2)
+    np.testing.assert_allclose(p1, p2)
+
+
+def test_num_sweeps_holds_after_configured_legs():
+    fs = 2000.0
+    gen = SineSweepGenerator(sample_rate=fs, sweep_type='linear',
+                              f_start=10.0, f_stop=20.0, sweep_rate=100.0,
+                              repeat=True, num_sweeps=3)
+    # duration = 0.1 s = 200 samples/leg; run well past the 3rd leg.
+    samples, freq, phase = gen.generate_block(1000, drive_amplitude=1.0)
+    t = np.arange(1000) / fs
+    # Same-direction sawtooth still wraps for the first two legs...
+    assert freq[199] > freq[200]
+    assert freq[399] > freq[400]
+    # ...but after the 3rd leg (t > 0.3s) it must hold at f_stop forever,
+    # not wrap a 4th time.
+    tail = freq[t > 0.3]
+    np.testing.assert_allclose(tail, 20.0)
+
+
+def test_alternate_direction_produces_continuous_triangle_wave():
+    fs = 2000.0
+    gen = SineSweepGenerator(sample_rate=fs, sweep_type='linear',
+                              f_start=10.0, f_stop=20.0, sweep_rate=100.0,
+                              repeat=True, num_sweeps=3, alternate_direction=True)
+    # duration = 0.1 s = 200 samples/leg: up, down, up, then hold.
+    samples, freq, phase = gen.generate_block(1000, drive_amplitude=1.0)
+    t = np.arange(1000) / fs
+    # Leg 0 (up): 10 -> 20. Leg 1 (down): 20 -> 10. Leg 2 (up): 10 -> 20.
+    assert freq[0] == pytest.approx(10.0, abs=0.5)
+    assert freq[199] == pytest.approx(20.0, abs=0.5)
+    assert freq[200] == pytest.approx(20.0, abs=0.5)
+    assert freq[399] == pytest.approx(10.0, abs=0.5)
+    assert freq[400] == pytest.approx(10.0, abs=0.5)
+    assert freq[599] == pytest.approx(20.0, abs=0.5)
+    # After the 3rd leg it holds at 20 (its end frequency) forever.
+    tail = freq[t > 0.3]
+    np.testing.assert_allclose(tail, 20.0)
+    # No jump anywhere in frequency at the turnarounds (unlike the
+    # same-direction sawtooth repeat).
+    dfreq = np.abs(np.diff(freq))
+    assert np.max(dfreq) < 100.0 / fs * 1.5  # bounded by the sweep rate alone
+    # And, as always, phase itself is smooth/monotonic throughout.
+    dphase = np.diff(phase)
+    assert np.all(dphase > 0)
+    max_expected = 2 * np.pi * 20.0 / fs * 1.01
+    assert np.all(dphase < max_expected)

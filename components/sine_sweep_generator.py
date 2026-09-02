@@ -60,12 +60,29 @@ class SineSweepGenerator:
 
     After ``t > T``: if ``repeat`` is ``False`` the frequency holds at
     ``f1`` indefinitely; if ``repeat`` is ``True`` the law is evaluated at
-    ``t modulo T`` so the sweep restarts from ``f0``. Note that in repeat
-    mode the *frequency* trajectory has a discontinuity at each wrap (an
-    instantaneous jump from ``f1`` back to ``f0``, inherent to a repeating
-    sweep), but the *phase* itself never resets or jumps -- it keeps
-    accumulating continuously through the wrap, which is what actually
-    matters for driving a DAC without glitches.
+    ``t modulo T`` so the sweep restarts from ``f0``. Note that with the
+    default ``alternate_direction=False`` the *frequency* trajectory has a
+    discontinuity at each wrap (an instantaneous jump from ``f1`` back to
+    ``f0``, inherent to a repeating same-direction sweep), but the *phase*
+    itself never resets or jumps -- it keeps accumulating continuously
+    through the wrap, which is what actually matters for driving a DAC
+    without glitches.
+
+    ``num_sweeps`` (only relevant when ``repeat`` is ``True``) limits how
+    many single sweep legs are performed before the frequency holds at the
+    final leg's end frequency indefinitely, instead of repeating forever.
+    ``0`` (the default) means unlimited, matching the original ``repeat``
+    behavior exactly.
+
+    ``alternate_direction`` (only relevant when ``repeat`` is ``True``)
+    makes each successive leg reverse direction instead of restarting from
+    ``f0`` -- i.e. up, down, up, down, ... -- producing a continuous
+    triangle-wave frequency trajectory with no jump at the turnarounds
+    (each leg ends exactly where the next one starts). This is useful e.g.
+    to let a closed-loop amplitude controller settle in by running one or
+    more full sweep legs before the leg(s) of interest, instead of (or in
+    addition to) dwelling at a fixed frequency -- a fixed low frequency can
+    have very different, harder-to-converge dynamics than the swept band.
 
     An optional ``pre_dwell_time`` holds the frequency at ``f0`` for that
     many seconds before the sweep law above is evaluated at all -- i.e. the
@@ -97,6 +114,15 @@ class SineSweepGenerator:
     repeat : bool
         If ``True``, the sweep restarts from the beginning once it reaches
         the end instead of holding. Default ``False``.
+    num_sweeps : int
+        Only used when ``repeat`` is ``True``. Number of single sweep legs
+        to perform before holding at the final frequency indefinitely.
+        ``0`` means unlimited (repeat forever). Default ``0``.
+    alternate_direction : bool
+        Only used when ``repeat`` is ``True``. If ``True``, each successive
+        leg reverses direction (up, down, up, down, ...) instead of
+        restarting from ``f0`` every time. Default ``False`` (matches
+        prior behavior exactly).
     pre_dwell_time : float
         Time in seconds to hold the frequency at ``f0`` before the sweep
         (or repeating sweep) begins. Default ``0.0`` (no dwell, matches
@@ -113,6 +139,8 @@ class SineSweepGenerator:
                  sweep_rate: float,
                  direction: str = 'up',
                  repeat: bool = False,
+                 num_sweeps: int = 0,
+                 alternate_direction: bool = False,
                  pre_dwell_time: float = 0.0,
                  initial_phase: float = 0.0):
         if sweep_type not in VALID_SWEEP_TYPES:
@@ -129,6 +157,8 @@ class SineSweepGenerator:
             raise ValueError('sweep_rate must be positive')
         if f_start == f_stop:
             raise ValueError('f_start and f_stop must differ')
+        if num_sweeps < 0:
+            raise ValueError('num_sweeps must be non-negative (0 means unlimited)')
         if pre_dwell_time < 0:
             raise ValueError('pre_dwell_time must be non-negative')
 
@@ -139,11 +169,20 @@ class SineSweepGenerator:
         self.sweep_rate = float(sweep_rate)
         self.direction = direction
         self.repeat = repeat
+        self.num_sweeps = int(num_sweeps)
+        self.alternate_direction = alternate_direction
         self.pre_dwell_time = float(pre_dwell_time)
 
         self._f0 = self.f_start if direction == 'up' else self.f_stop
         self._f1 = self.f_stop if direction == 'up' else self.f_start
         self._sign = 1.0 if self._f1 >= self._f0 else -1.0
+
+        if not self.repeat:
+            self._num_legs = 1
+        elif self.num_sweeps <= 0:
+            self._num_legs = None  # unlimited
+        else:
+            self._num_legs = self.num_sweeps
 
         if sweep_type == 'linear':
             self._duration = abs(self._f1 - self._f0) / self.sweep_rate
@@ -178,6 +217,16 @@ class SineSweepGenerator:
         return self.pre_dwell_time + self._duration
 
     @property
+    def total_sweeps_duration(self):
+        """``pre_dwell_time + (all legs' duration)``: time from generator
+        start until every configured leg has completed and the frequency
+        holds indefinitely. ``None`` if the number of legs is unlimited
+        (``repeat=True`` with ``num_sweeps=0``)."""
+        if self._num_legs is None:
+            return None
+        return self.pre_dwell_time + self._num_legs * self._duration
+
+    @property
     def elapsed_time(self) -> float:
         """Total time in seconds elapsed since construction/:meth:`reset`."""
         return self._elapsed_samples / self.sample_rate
@@ -189,14 +238,30 @@ class SineSweepGenerator:
         for any block of times independent of prior calls.
         """
         t_dwelled = np.maximum(0.0, t - self.pre_dwell_time)
-        if self.repeat and self._duration > 0:
-            t_eff = np.mod(t_dwelled, self._duration)
+        T = self._duration
+        raw_leg = np.floor(t_dwelled / T)
+        if self._num_legs is not None:
+            leg = np.minimum(raw_leg, self._num_legs - 1)
         else:
-            t_eff = np.minimum(t_dwelled, self._duration)
+            leg = raw_leg
+        t_eff = np.clip(t_dwelled - leg * T, 0.0, T)
+
+        if self.alternate_direction:
+            odd_leg = np.mod(leg, 2) >= 1
+        else:
+            odd_leg = np.zeros_like(leg, dtype=bool)
+        # Even legs run f0->f1 (this generator's configured direction); odd
+        # legs (only reachable with alternate_direction) reverse to f1->f0,
+        # meeting the next leg's start exactly so frequency stays continuous
+        # through every turnaround (no jump, unlike the same-direction
+        # repeat below).
+        leg_start = np.where(odd_leg, self._f1, self._f0)
+        leg_sign = np.where(odd_leg, -self._sign, self._sign)
+
         if self.sweep_type == 'linear':
-            return self._f0 + self._sign * self.sweep_rate * t_eff
+            return leg_start + leg_sign * self.sweep_rate * t_eff
         else:
-            return self._f0 * 2.0 ** (self._sign * self._k * t_eff)
+            return leg_start * 2.0 ** (leg_sign * self._k * t_eff)
 
     def generate_block(self, num_samples: int, drive_amplitude
                         ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:

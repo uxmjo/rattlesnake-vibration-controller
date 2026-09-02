@@ -138,6 +138,8 @@ class SineForceControlParameters(AbstractMetadata):
                  sweep_rate: float,
                  direction: str,
                  repeat: bool,
+                 num_sweeps: int,
+                 alternate_direction: bool,
                  force_channel_index: int,
                  target_force: float,
                  force_floor: float,
@@ -158,6 +160,8 @@ class SineForceControlParameters(AbstractMetadata):
         self.sweep_rate = sweep_rate
         self.direction = direction
         self.repeat = repeat
+        self.num_sweeps = num_sweeps
+        self.alternate_direction = alternate_direction
         self.force_channel_index = force_channel_index
         self.target_force = target_force
         self.force_floor = force_floor
@@ -179,6 +183,8 @@ class SineForceControlParameters(AbstractMetadata):
         netcdf_group_handle.sweep_rate = self.sweep_rate
         netcdf_group_handle.direction = self.direction
         netcdf_group_handle.repeat = 1 if self.repeat else 0
+        netcdf_group_handle.num_sweeps = self.num_sweeps
+        netcdf_group_handle.alternate_direction = 1 if self.alternate_direction else 0
         netcdf_group_handle.force_channel_index = self.force_channel_index
         netcdf_group_handle.target_force = self.target_force
         netcdf_group_handle.force_unit = 'peak'
@@ -217,6 +223,8 @@ class SineForceControlParameters(AbstractMetadata):
             sweep_rate=widget.sweep_rate_selector.value(),
             direction=DIRECTION_UI_TO_INTERNAL[widget.direction_selector.currentText()],
             repeat=widget.repeat_sweep_checkbox.isChecked(),
+            num_sweeps=widget.num_sweeps_selector.value(),
+            alternate_direction=widget.alternate_direction_checkbox.isChecked(),
             force_channel_index=widget.force_channel_selector.currentData(),
             target_force=widget.target_force_selector.value(),
             force_floor=widget.force_floor_selector.value(),
@@ -366,6 +374,10 @@ class SineForceControlUI(AbstractUI):
         self.definition_widget.direction_selector.setCurrentText(
             DIRECTION_INTERNAL_TO_UI[group.direction])
         self.definition_widget.repeat_sweep_checkbox.setChecked(bool(group.repeat))
+        self.definition_widget.num_sweeps_selector.setValue(
+            int(getattr(group, 'num_sweeps', 0)))
+        self.definition_widget.alternate_direction_checkbox.setChecked(
+            bool(getattr(group, 'alternate_direction', 0)))
         index = self.definition_widget.force_channel_selector.findData(int(group.force_channel_index))
         if index >= 0:
             self.definition_widget.force_channel_selector.setCurrentIndex(index)
@@ -469,6 +481,8 @@ class SineForceControlUI(AbstractUI):
             ('Sweep Rate', 'Hz/s (linear) or octaves/min (logarithmic)'),
             ('Direction', 'Up or Down'),
             ('Repeat', '0 or 1'),
+            ('Number of Sweeps', 'Only used if Repeat=1. 0 = unlimited'),
+            ('Alternate Direction', 'Only used if Repeat=1. 0 or 1 -- up/down/up/down... sweep'),
             ('Force Channel Index', '0-based index into the channel table'),
             ('Target Force', 'N peak'),
             ('Force Floor', 'N peak'),
@@ -494,20 +508,22 @@ class SineForceControlUI(AbstractUI):
         self.definition_widget.sweep_rate_selector.setValue(float(worksheet.cell(5, 2).value))
         self.definition_widget.direction_selector.setCurrentText(str(worksheet.cell(6, 2).value))
         self.definition_widget.repeat_sweep_checkbox.setChecked(bool(int(worksheet.cell(7, 2).value)))
-        index = self.definition_widget.force_channel_selector.findData(int(worksheet.cell(8, 2).value))
+        self.definition_widget.num_sweeps_selector.setValue(int(worksheet.cell(8, 2).value))
+        self.definition_widget.alternate_direction_checkbox.setChecked(bool(int(worksheet.cell(9, 2).value)))
+        index = self.definition_widget.force_channel_selector.findData(int(worksheet.cell(10, 2).value))
         if index >= 0:
             self.definition_widget.force_channel_selector.setCurrentIndex(index)
-        self.definition_widget.target_force_selector.setValue(float(worksheet.cell(9, 2).value))
-        self.definition_widget.force_floor_selector.setValue(float(worksheet.cell(10, 2).value))
-        self.definition_widget.tracking_bandwidth_selector.setValue(float(worksheet.cell(11, 2).value))
-        self.definition_widget.controller_alpha_selector.setValue(float(worksheet.cell(12, 2).value))
-        self.definition_widget.control_update_period_selector.setValue(float(worksheet.cell(13, 2).value))
-        self.definition_widget.initial_drive_selector.setValue(float(worksheet.cell(14, 2).value))
-        self.definition_widget.max_drive_selector.setValue(float(worksheet.cell(15, 2).value))
-        self.definition_widget.abort_drive_selector.setValue(float(worksheet.cell(16, 2).value))
-        self.definition_widget.max_drive_step_selector.setValue(float(worksheet.cell(17, 2).value))
-        self.definition_widget.ramp_time_selector.setValue(float(worksheet.cell(18, 2).value))
-        self.definition_widget.pre_dwell_time_selector.setValue(float(worksheet.cell(19, 2).value))
+        self.definition_widget.target_force_selector.setValue(float(worksheet.cell(11, 2).value))
+        self.definition_widget.force_floor_selector.setValue(float(worksheet.cell(12, 2).value))
+        self.definition_widget.tracking_bandwidth_selector.setValue(float(worksheet.cell(13, 2).value))
+        self.definition_widget.controller_alpha_selector.setValue(float(worksheet.cell(14, 2).value))
+        self.definition_widget.control_update_period_selector.setValue(float(worksheet.cell(15, 2).value))
+        self.definition_widget.initial_drive_selector.setValue(float(worksheet.cell(16, 2).value))
+        self.definition_widget.max_drive_selector.setValue(float(worksheet.cell(17, 2).value))
+        self.definition_widget.abort_drive_selector.setValue(float(worksheet.cell(18, 2).value))
+        self.definition_widget.max_drive_step_selector.setValue(float(worksheet.cell(19, 2).value))
+        self.definition_widget.ramp_time_selector.setValue(float(worksheet.cell(20, 2).value))
+        self.definition_widget.pre_dwell_time_selector.setValue(float(worksheet.cell(21, 2).value))
 
 
 class SineForceControlEnvironment(AbstractEnvironment):
@@ -580,6 +596,8 @@ class SineForceControlEnvironment(AbstractEnvironment):
             sweep_rate=environment_parameters.sweep_rate,
             direction=environment_parameters.direction,
             repeat=environment_parameters.repeat,
+            num_sweeps=environment_parameters.num_sweeps,
+            alternate_direction=environment_parameters.alternate_direction,
             pre_dwell_time=environment_parameters.pre_dwell_time_s)
         self.input_phase_generator = SineSweepGenerator(
             sample_rate=environment_parameters.sample_rate,
@@ -589,6 +607,8 @@ class SineForceControlEnvironment(AbstractEnvironment):
             sweep_rate=environment_parameters.sweep_rate,
             direction=environment_parameters.direction,
             repeat=environment_parameters.repeat,
+            num_sweeps=environment_parameters.num_sweeps,
+            alternate_direction=environment_parameters.alternate_direction,
             pre_dwell_time=environment_parameters.pre_dwell_time_s)
         self.estimator = ForceTrackingEstimator(
             sample_rate=environment_parameters.sample_rate,
