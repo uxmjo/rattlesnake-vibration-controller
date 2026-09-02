@@ -150,13 +150,46 @@ class FeedforwardLearnResult:
 
 class _DirectionTable:
     """Holds the per-bin learned value/observation-count arrays for one
-    direction (or the single shared direction)."""
+    direction (or the single shared direction).
 
-    __slots__ = ('value', 'n_obs')
+    ``n_obs`` and ``live_obs`` are deliberately two different counters:
+
+    * ``n_obs`` drives the adaptive learning rate (see
+      :meth:`FeedforwardMap.update`) and the reported :meth:`confidence` --
+      it *is* carried over by :meth:`FeedforwardMap.load` (capped), since a
+      loaded value should still get a reasonably fast-but-not-instant
+      starting learning rate rather than being treated as totally unknown.
+    * ``live_obs`` counts only observations accepted by real ``update()``
+      calls made by *this* running instance -- never set by ``load()``, so
+      it is always 0 right after loading, even for a bin whose ``n_obs`` was
+      carried over. It exists solely to gate outlier rejection (see
+      ``FeedforwardMap.update``): rejecting a new observation because it
+      disagrees with an unconfirmed *loaded* value would silently discard
+      every subsequent correct observation forever whenever the operating
+      point changed enough between saves (verified to reproduce exactly
+      that failure mode before this counter was split out) -- outlier
+      protection should only kick in once a value has been corroborated by
+      this session's own live data, not merely loaded from disk.
+    * ``consec_rejected`` counts *consecutive* outlier rejections for a
+      bin, reset to 0 on any accepted update. See
+      ``outlier_reject_persistence`` on :class:`FeedforwardMap`: a single
+      rejected sample is (by definition) treated as a one-off outlier, but
+      the *same kind* of "outlier" repeating past that persistence count is
+      no longer statistically a rare event -- it means the reference value
+      itself is what is stale (this is also what rescues a bin from the
+      load()-across-a-changed-operating-point case above once the
+      ``live_obs`` grace period alone is not enough to close the gap, e.g.
+      a large target-force change -- the per-update step cap can still be
+      too small to reach agreement within the ``live_obs`` grace window).
+    """
+
+    __slots__ = ('value', 'n_obs', 'live_obs', 'consec_rejected')
 
     def __init__(self, n_bins: int):
         self.value = np.full(n_bins, np.nan)
         self.n_obs = np.zeros(n_bins)
+        self.live_obs = np.zeros(n_bins)
+        self.consec_rejected = np.zeros(n_bins)
 
     def has_any_data(self) -> bool:
         return bool(np.any(self.n_obs > 0))
@@ -217,10 +250,22 @@ class FeedforwardMap:
         in, once the target bin has at least ``outlier_reject_min_observations``
         prior observations. Default ``4.0``.
     outlier_reject_min_observations : float
-        Minimum prior observation count a bin must have before outlier
-        rejection engages (a brand-new bin has nothing yet to compare
-        against, other than the global fallback/neighbor baseline -- see
-        module docstring). Default ``2``.
+        Minimum prior *live* (this-session) observation count a bin must
+        have before outlier rejection engages (a brand-new bin, or one
+        whose value was only just loaded from disk, has nothing yet to
+        compare against other than the global fallback/neighbor baseline or
+        an unconfirmed loaded value -- see module docstring and
+        :meth:`load`). Default ``2``.
+    outlier_reject_persistence : float
+        A single rejected observation is treated as a one-off outlier, but
+        the *same* bin being rejected this many times in a row is no longer
+        statistically a rare event -- it means the reference value itself
+        has become stale (e.g. the operating point changed -- see
+        :meth:`load`'s warning -- or slow real drift moved the true value
+        further than one update's step cap could follow before the next
+        sample arrived). Past this many consecutive rejections, the next
+        observation is accepted unconditionally instead of being rejected
+        forever. Default ``3``.
     max_observations_cap : float
         Upper bound on the effective per-bin observation count used to
         compute the adaptive learning rate -- keeps a small residual
@@ -250,6 +295,7 @@ class FeedforwardMap:
                  max_relative_step_per_update: float = 0.3,
                  outlier_reject_ratio: float = 4.0,
                  outlier_reject_min_observations: float = 2.0,
+                 outlier_reject_persistence: float = 3.0,
                  max_observations_cap: float = 50.0,
                  separate_direction: bool = False):
         if not (0.0 < f_min < f_max):
@@ -266,6 +312,8 @@ class FeedforwardMap:
             raise ValueError('max_relative_step_per_update must satisfy 0 < x <= 1')
         if outlier_reject_ratio <= 1.0:
             raise ValueError('outlier_reject_ratio must be > 1')
+        if outlier_reject_persistence < 1.0:
+            raise ValueError('outlier_reject_persistence must be >= 1')
         if max_observations_cap <= 0:
             raise ValueError('max_observations_cap must be positive')
 
@@ -279,6 +327,7 @@ class FeedforwardMap:
         self.max_relative_step_per_update = float(max_relative_step_per_update)
         self.outlier_reject_ratio = float(outlier_reject_ratio)
         self.outlier_reject_min_observations = float(outlier_reject_min_observations)
+        self.outlier_reject_persistence = float(outlier_reject_persistence)
         self.max_observations_cap = float(max_observations_cap)
         self.separate_direction = bool(separate_direction)
 
@@ -413,13 +462,27 @@ class FeedforwardMap:
         clipped_obs = min(max(observed_value, self.value_min), self.value_max)
 
         # Outlier rejection: only once the *target bin itself* has enough
-        # history of its own to trust over a single new sample -- a fresh
-        # bin must be allowed to accept its first observations even if they
-        # look surprising relative to neighboring bins/resonances.
-        if table.n_obs[idx] >= self.outlier_reject_min_observations:
+        # *live* (this-session) history of its own to trust over a single
+        # new sample -- a fresh bin must be allowed to accept its first
+        # observations even if they look surprising relative to neighboring
+        # bins/resonances. Deliberately gated on live_obs, not n_obs: a
+        # value merely carried over by load() has not been corroborated by
+        # any real observation yet, so it must not be able to block live
+        # data from ever correcting it (see _DirectionTable docstring).
+        if table.live_obs[idx] >= self.outlier_reject_min_observations:
             ratio = clipped_obs / reference
-            if ratio > self.outlier_reject_ratio or ratio < 1.0 / self.outlier_reject_ratio:
-                return FeedforwardLearnResult(False, 'outlier_rejected', idx, baseline, baseline)
+            is_outlier = ratio > self.outlier_reject_ratio or ratio < 1.0 / self.outlier_reject_ratio
+            if is_outlier:
+                table.consec_rejected[idx] += 1.0
+                # A single rejection is a one-off outlier; the *same* bin
+                # being rejected many times in a row instead means the
+                # reference itself is stale (real drift, or a loaded value
+                # from a changed operating point too far off for the
+                # live_obs grace period + per-update step cap to close in
+                # time -- see _DirectionTable docstring) -- past
+                # outlier_reject_persistence, stop defending it.
+                if table.consec_rejected[idx] < self.outlier_reject_persistence:
+                    return FeedforwardLearnResult(False, 'outlier_rejected', idx, baseline, baseline)
 
         if old_value is None:
             # This bin has no observation of its own yet -- accept the first
@@ -442,6 +505,8 @@ class FeedforwardMap:
 
         table.value[idx] = new_value
         table.n_obs[idx] = min(table.n_obs[idx] + 1.0, self.max_observations_cap)
+        table.live_obs[idx] = min(table.live_obs[idx] + 1.0, self.max_observations_cap)
+        table.consec_rejected[idx] = 0.0
 
         return FeedforwardLearnResult(True, 'ok', idx, baseline, float(new_value))
 
@@ -476,8 +541,35 @@ class FeedforwardMap:
         same log-log interpolation used by :meth:`get` -- so the loaded data
         does not need to have been saved with identical
         ``bins_per_decade``/``f_min``/``f_max``. Carries over a reduced
-        observation count per bin (capped) so learning remains responsive
-        rather than frozen at whatever rate the old data implied."""
+        observation count per bin (capped *below*
+        ``outlier_reject_min_observations`` -- see the warning below) so
+        learning remains responsive rather than frozen at whatever rate the
+        old data implied.
+
+        Warning -- loading across a changed operating point
+        -----------------------------------------------------
+        This map has no notion of *why* a value was learned (target force,
+        tracking bandwidth, specimen, mounting, ...) -- it is purely
+        ``frequency -> value``. If the operating point changes enough that
+        the physically-correct values shift substantially (most commonly: a
+        different target force on a system that is not perfectly linear),
+        a loaded value is now a plausible-looking but wrong starting guess.
+        The observation-count cap below exists specifically so that case
+        recovers instead of getting stuck: capping strictly *below*
+        ``outlier_reject_min_observations`` guarantees the first real
+        observation after loading is never outlier-rejected purely because
+        it disagrees with the stale loaded value (outlier rejection would
+        otherwise compare every new, correct observation against a loaded
+        value that is never itself updated -- silently discarding all of
+        them forever, verified to reproduce exactly the "map stops
+        responding after loading old data into a changed test" failure
+        mode). It still takes several real observations to fully correct a
+        badly-off loaded value (the usual per-update step limits still
+        apply) -- for a target-force change in particular, prefer starting
+        from an empty map (or don't check "Load on Start") unless the
+        plant is known to be near-linear over the amplitude range in
+        question.
+        """
         with open(path, 'r') as f:
             d = json.load(f)
         n_bins_saved = len(d.get('bin_edges', [])) - 1
@@ -525,7 +617,11 @@ class FeedforwardMap:
                 return float(10.0 ** log_v), float(min(n_obs[i_lo], n_obs[i_hi]))
             return None
 
-        carried_over_obs_cap = min(self.max_observations_cap, self.outlier_reject_min_observations + 3.0)
+        # Only affects the eff_lr warm-start rate (see _DirectionTable
+        # docstring) -- outlier-rejection safety no longer depends on this
+        # cap (it is gated on live_obs, which load() never sets), so this
+        # can safely stay generous rather than artificially small.
+        carried_over_obs_cap = min(self.max_observations_cap, 10.0)
         for key, table in self._tables.items():
             for i, log_f in enumerate(self._log_bin_centers):
                 result = source_value_and_conf(key, log_f)

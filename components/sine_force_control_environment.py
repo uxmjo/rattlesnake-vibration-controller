@@ -116,6 +116,7 @@ MIN_ADAPTIVE_TRACKING_BANDWIDTH_HZ = 0.01
 # docstring for what each one protects against.
 FEEDFORWARD_OUTLIER_REJECT_RATIO = 4.0
 FEEDFORWARD_OUTLIER_REJECT_MIN_OBSERVATIONS = 2.0
+FEEDFORWARD_OUTLIER_REJECT_PERSISTENCE = 3.0
 FEEDFORWARD_MAX_RELATIVE_STEP_PER_UPDATE = 0.3
 FEEDFORWARD_MAX_OBSERVATIONS_CAP = 50.0
 # Not wired to the UI: a single shared A_FF(f) curve is learned from both
@@ -840,6 +841,7 @@ class SineForceControlEnvironment(AbstractEnvironment):
                 max_relative_step_per_update=FEEDFORWARD_MAX_RELATIVE_STEP_PER_UPDATE,
                 outlier_reject_ratio=FEEDFORWARD_OUTLIER_REJECT_RATIO,
                 outlier_reject_min_observations=FEEDFORWARD_OUTLIER_REJECT_MIN_OBSERVATIONS,
+                outlier_reject_persistence=FEEDFORWARD_OUTLIER_REJECT_PERSISTENCE,
                 max_observations_cap=FEEDFORWARD_MAX_OBSERVATIONS_CAP,
                 separate_direction=FEEDFORWARD_SEPARATE_DIRECTION)
             if environment_parameters.feedforward_load_on_start and environment_parameters.feedforward_file:

@@ -249,3 +249,71 @@ def test_separate_direction_requires_direction_argument():
         ff.get(100.0, direction=None)
     with pytest.raises(ValueError):
         ff.update(100.0, 0.2, trust=True, direction='sideways')
+
+
+# -- Regression: a bin must never get permanently stuck rejecting live data --
+
+def test_persistent_disagreement_eventually_overrides_stale_reference():
+    """A single surprising sample is a one-off outlier and must be rejected
+    (see test_single_outlier_does_not_destroy_established_bin), but the same
+    kind of "outlier" repeating past outlier_reject_persistence times in a
+    row is no longer statistically an outlier -- it means the reference bin
+    value itself is stale (e.g. real drift, or a changed operating point --
+    see the next test). The bin must recover, not reject forever."""
+    ff = make_map(outlier_reject_ratio=4.0, outlier_reject_persistence=3.0, learning_rate=0.2)
+    f = 100.0
+    for _ in range(10):
+        ff.update(f, observed_value=0.2, trust=True)
+    established = ff.get(f)
+    assert established == pytest.approx(0.2, rel=0.1)
+
+    # The true value has genuinely moved far outside the outlier ratio --
+    # simulate many repeated "surprising" but consistent observations.
+    reasons = []
+    for _ in range(40):
+        result = ff.update(f, observed_value=0.01, trust=True)
+        reasons.append(result.reason)
+
+    assert 'outlier_rejected' in reasons  # some rejections did happen...
+    assert reasons.count('ok') >= 5       # ...but it was not stuck forever
+    # And it must have moved substantially toward the new true value, not
+    # stayed pinned at the old one.
+    assert ff.get(f) < established * 0.5
+
+
+def test_load_across_large_operating_point_change_recovers_not_stuck():
+    """Regression test for a confirmed bug: loading a map learned under one
+    operating point (e.g. a different target force) into a run where the
+    true required values are now far outside outlier_reject_ratio used to
+    cause every single subsequent -- correct -- live observation to be
+    rejected forever (the loaded value was never itself corroborated by
+    live data, yet was defended as if it had been). Verified to reproduce
+    with a >4x regime change before the live_obs/outlier_reject_persistence
+    fix; must now recover within a bounded number of live observations."""
+    f = 100.0
+    ff_old = make_map(learning_rate=0.2)
+    for _ in range(10):
+        ff_old.update(f, observed_value=0.40, trust=True)
+
+    ff_new = make_map(learning_rate=0.2)
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'map.json')
+        ff_old.save(path)
+        ff_new.load(path)
+
+    assert ff_new.get(f) == pytest.approx(0.40, rel=1e-6)
+
+    # New operating point needs ~6.7x less drive at this frequency -- well
+    # beyond the default outlier_reject_ratio of 4.0.
+    reasons = []
+    for _ in range(30):
+        result = ff_new.update(f, observed_value=0.06, trust=True)
+        reasons.append(result.reason)
+        if ff_new.get(f) < 0.10:
+            break
+
+    assert reasons.count('ok') >= 1
+    # Must have made real, substantial progress toward the true value --
+    # not stayed pinned at (or near) the stale loaded value of 0.40.
+    assert ff_new.get(f) < 0.25
