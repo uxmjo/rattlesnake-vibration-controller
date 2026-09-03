@@ -253,7 +253,7 @@ def test_adaptive_tracking_bandwidth_beats_fixed_at_sweep_turnaround():
 
 def run_closed_loop_with_feedforward(gen, estimator, trim_controller, feedforward_map,
                                       target_force, n_total, gain_fn, max_drive_v,
-                                      max_drive_step_v):
+                                      max_drive_step_v, learning_leg_holdoff_s=0.0):
     """Mirrors SineForceControlEnvironment._update_feedforward_and_compose:
     u_total = A_FF(f) * g, g from the (unmodified) ForceAmplitudeController
     reused as a trim, learned into feedforward_map from u_total whenever the
@@ -273,10 +273,19 @@ def run_closed_loop_with_feedforward(gen, estimator, trim_controller, feedforwar
     destabilizes tracking, confirmed to make it *worse* than feedforward
     being disabled even on the very first, initially-empty leg. See
     SineForceControlEnvironment.initialize_environment_test_parameters for
-    the identical split in the real environment."""
+    the identical split in the real environment.
+
+    ``learning_leg_holdoff_s`` mirrors
+    _feedforward_learning_leg_holdoff_s/_feedforward_leg_start_time there
+    too: learning is additionally held off for this long after every leg
+    boundary (default 0 = no holdoff, matching prior behavior) -- a fresh
+    settling transient re-occurs at *every* direction turnaround (worst at
+    the low-frequency end), not just the very first leg, and can pass the
+    error-magnitude gate anyway during its decaying tail."""
     total_drive_amplitude = feedforward_map.initial_estimate
     published_map = copy.deepcopy(feedforward_map)
     committed_leg = 0
+    leg_start_time = 0.0
     diagnostics = {'leg': [], 'direction': [], 'frequency': [],
                     'relative_error': [], 'feedback_pct': [], 'total_drive': [],
                     'status': []}
@@ -293,6 +302,7 @@ def run_closed_loop_with_feedforward(gen, estimator, trim_controller, feedforwar
         if leg != committed_leg:
             published_map = copy.deepcopy(feedforward_map)
             committed_leg = leg
+            leg_start_time = gen.elapsed_time
         f_end = float(freq[-1])
         composition = compose_drive_amplitude(
             published_map, f_end, ctrl_result.drive_amplitude, total_drive_amplitude,
@@ -304,7 +314,8 @@ def run_closed_loop_with_feedforward(gen, estimator, trim_controller, feedforwar
         trim_controller.drive_amplitude = achieved_trim_gain
 
         trust = (ctrl_result.status is ControllerStatus.OK
-                 and abs(ctrl_result.relative_force_error) <= FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR)
+                 and abs(ctrl_result.relative_force_error) <= FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR
+                 and (gen.elapsed_time - leg_start_time) >= learning_leg_holdoff_s)
         feedforward_map.update(f_end, observed_value=total_drive_amplitude, trust=trust, direction=direction)
 
         assert np.isfinite(total_drive_amplitude)

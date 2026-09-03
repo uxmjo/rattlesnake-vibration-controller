@@ -112,6 +112,13 @@ def run_simulation(f_start=5.0, f_stop=2000.0, target_force=6.0, n_legs=5,
     # for the identical split in the real environment.
     published_map = copy.deepcopy(feedforward_map) if feedforward_map is not None else None
     committed_leg = 0
+    leg_start_time = 0.0
+    # Mirrors _feedforward_learning_leg_holdoff_s in the real environment:
+    # a settling transient re-occurs at every direction turnaround (worst at
+    # the low-frequency end, where the tracking filter is slowest), so
+    # learning is held off for one settle time constant after every leg
+    # boundary too, not just the first.
+    learning_leg_holdoff_s = 5.0 / (2 * np.pi * 6.0)
 
     leg_duration = gen.sweep_duration
     n_total = int(n_legs * leg_duration * FS)
@@ -134,6 +141,7 @@ def run_simulation(f_start=5.0, f_stop=2000.0, target_force=6.0, n_legs=5,
             if leg != committed_leg:
                 published_map = copy.deepcopy(feedforward_map)
                 committed_leg = leg
+                leg_start_time = gen.elapsed_time
             composition = compose_drive_amplitude(
                 published_map, f_end, ctrl_result.drive_amplitude, total_drive_amplitude,
                 max_drive_v, max_drive_step_v, direction=direction)
@@ -147,7 +155,8 @@ def run_simulation(f_start=5.0, f_stop=2000.0, target_force=6.0, n_legs=5,
             # doesn't mean settled -- e.g. mid a startup ring-down -- so also
             # require the error to already be reasonably small.
             trust = (ctrl_result.status is ControllerStatus.OK
-                     and abs(ctrl_result.relative_force_error) <= 0.15)
+                     and abs(ctrl_result.relative_force_error) <= 0.15
+                     and (gen.elapsed_time - leg_start_time) >= learning_leg_holdoff_s)
             learn_result = feedforward_map.update(f_end, observed_value=total_drive_amplitude,
                                                     trust=trust, direction=direction)
             ff_value = composition.feedforward_value

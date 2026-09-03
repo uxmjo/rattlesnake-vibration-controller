@@ -845,6 +845,8 @@ class SineForceControlEnvironment(AbstractEnvironment):
         self.feedforward_map = None
         self.feedforward_map_published = None
         self._feedforward_committed_leg = 0
+        self._feedforward_learning_leg_holdoff_s = 0.0
+        self._feedforward_leg_start_time = 0.0
         self.total_drive_amplitude = 0.0
         self._last_feedforward_value = float('nan')
         self._last_feedback_correction_pct = float('nan')
@@ -950,6 +952,26 @@ class SineForceControlEnvironment(AbstractEnvironment):
             # module docstring) rather than being merely a stability patch.
             self.feedforward_map_published = copy.deepcopy(self.feedforward_map)
             self._feedforward_committed_leg = 0
+            # Learning is additionally held off for this long after *every*
+            # sweep-leg boundary (not just the very first), tracked via
+            # _feedforward_leg_start_time below -- same settle-time formula
+            # already used for the "Control Update Period May Be Too Short"
+            # warning in SineForceControlUI.initialize_environment. Confirmed
+            # necessary: a fresh startup-style settling transient re-occurs
+            # at *every* direction turnaround (worst at f_start, where the
+            # filter is slowest), not only at the very start of the test --
+            # Pre-Sweep Dwell Time only covers that first start. Without this
+            # holdoff, every turnaround keeps re-teaching a small ring-down
+            # into the low-frequency bins, indefinitely, run after run, even
+            # with FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR already in place.
+            if environment_parameters.adaptive_tracking_bandwidth:
+                worst_case_bandwidth_hz = ForceTrackingEstimator.bandwidth_for_tracking_cycles(
+                    min(environment_parameters.f_start, environment_parameters.f_stop),
+                    environment_parameters.tracking_cycles)
+            else:
+                worst_case_bandwidth_hz = environment_parameters.tracking_bandwidth_hz
+            self._feedforward_learning_leg_holdoff_s = 5.0 / (2 * np.pi * worst_case_bandwidth_hz)
+            self._feedforward_leg_start_time = 0.0
             self.controller = ForceAmplitudeController(
                 alpha=environment_parameters.controller_alpha,
                 force_floor=environment_parameters.force_floor,
@@ -1027,6 +1049,7 @@ class SineForceControlEnvironment(AbstractEnvironment):
             if leg != self._feedforward_committed_leg:
                 self.feedforward_map_published = copy.deepcopy(self.feedforward_map)
                 self._feedforward_committed_leg = leg
+                self._feedforward_leg_start_time = self.elapsed_time
 
             composition = compose_drive_amplitude(
                 self.feedforward_map_published, frequency, ctrl_result.drive_amplitude,
@@ -1053,11 +1076,18 @@ class SineForceControlEnvironment(AbstractEnvironment):
             # force error is already reasonably small (see
             # FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR docstring: OK status
             # alone does not mean the loop has actually settled, e.g. mid-
-            # ring-down). Written into feedforward_map (the write side) --
-            # takes effect for composition only once published at the next
-            # leg boundary above.
+            # ring-down) -- AND enough time has passed since this sweep leg
+            # started (see _feedforward_learning_leg_holdoff_s docstring in
+            # initialize_environment_test_parameters: a fresh settling
+            # transient re-occurs at every direction turnaround, not only
+            # the very first leg, and can pass the error-magnitude gate
+            # anyway during its decaying tail). Written into feedforward_map
+            # (the write side) -- takes effect for composition only once
+            # published at the next leg boundary above.
             trust = (ctrl_result.status is ControllerStatus.OK
-                      and abs(ctrl_result.relative_force_error) <= FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR)
+                      and abs(ctrl_result.relative_force_error) <= FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR
+                      and (self.elapsed_time - self._feedforward_leg_start_time)
+                          >= self._feedforward_learning_leg_holdoff_s)
             learn_result = self.feedforward_map.update(
                 frequency, observed_value=self.total_drive_amplitude, trust=trust, direction=direction)
 
