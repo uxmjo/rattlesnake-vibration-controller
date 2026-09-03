@@ -22,6 +22,12 @@ from components.feedforward_map import FeedforwardMap, compose_drive_amplitude
 
 FS = 5000.0
 BLOCK_SIZE = 256
+# Mirrors FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR in
+# components/sine_force_control_environment.py: learning trust additionally
+# requires the force error to already be reasonably small, not just
+# ControllerStatus.OK -- otherwise a startup/transient ring-down (OK status
+# throughout, but far from settled) gets learned bin-by-bin into the curve.
+FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR = 0.15
 
 
 def resonant_plant_gain(freq, fr=80.0, zeta=0.05, h0=2.0):
@@ -297,7 +303,8 @@ def run_closed_loop_with_feedforward(gen, estimator, trim_controller, feedforwar
                                   trim_controller.max_drive_amplitude)
         trim_controller.drive_amplitude = achieved_trim_gain
 
-        trust = ctrl_result.status is ControllerStatus.OK
+        trust = (ctrl_result.status is ControllerStatus.OK
+                 and abs(ctrl_result.relative_force_error) <= FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR)
         feedforward_map.update(f_end, observed_value=total_drive_amplitude, trust=trust, direction=direction)
 
         assert np.isfinite(total_drive_amplitude)
@@ -453,7 +460,8 @@ def test_trim_controller_does_not_windup_when_composition_is_slew_limited():
                                       trim_controller.max_drive_amplitude)
             trim_controller.drive_amplitude = achieved_trim_gain
 
-            trust = ctrl_result.status is ControllerStatus.OK
+            trust = (ctrl_result.status is ControllerStatus.OK
+                     and abs(ctrl_result.relative_force_error) <= FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR)
             feedforward_map.update(float(freq[-1]), observed_value=total_drive_amplitude,
                                     trust=trust, direction='up')
 
@@ -585,7 +593,8 @@ def test_feedforward_first_leg_is_not_worse_than_disabled():
                     total_drive_amplitude = composition.total_drive_amplitude
                     achieved = min(max(composition.achieved_trim_gain, 0.0), trim_controller.max_drive_amplitude)
                     trim_controller.drive_amplitude = achieved
-                    trust = ctrl_result.status is ControllerStatus.OK
+                    trust = (ctrl_result.status is ControllerStatus.OK
+                             and abs(ctrl_result.relative_force_error) <= FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR)
                     feedforward_map.update(float(freq[-1]), observed_value=total_drive_amplitude,
                                             trust=trust, direction=direction)
                 else:

@@ -127,6 +127,28 @@ LAST_USED_SETTINGS_PATH = os.path.join(
 FEEDFORWARD_OUTLIER_REJECT_RATIO = 4.0
 FEEDFORWARD_OUTLIER_REJECT_MIN_OBSERVATIONS = 2.0
 FEEDFORWARD_OUTLIER_REJECT_PERSISTENCE = 3.0
+# Additional learning-trust gate, on top of ControllerStatus.OK: an
+# observation is only learned from if the force error at that moment is
+# already reasonably small. ControllerStatus.OK only means "not held,
+# not saturated" -- it says nothing about whether the loop has actually
+# settled to a stable value yet. Confirmed necessary: the startup of every
+# continuous run (and, more generally, any large/rapid change in required
+# drive) produces a classic underdamped ring-down in measured force --
+# amplitude-estimator phase lag (larger at low frequency, where the
+# adaptive tracking bandwidth is narrowest) interacting with the fast
+# loop's own correction -- with error swinging tens of percent above and
+# below target for several cycles before settling. Without this gate,
+# that ring gets learned bin-by-bin (adjacent bins landing on opposite
+# swings of the same ring, since a log sweep advances at a constant
+# octave rate and the ring has a roughly constant time period), baking a
+# spurious oscillating "sawtooth" into the low-frequency part of the
+# curve -- which, once used as A_FF(f), then measurably re-excites (and,
+# run over run via Save/Load, compounds) exactly the same ringing it was
+# born from. Loosen with caution: this does not distinguish "still
+# ringing" from "genuinely far off target for some other reason" -- a
+# genuinely large, real, converged error at some frequency also will not
+# be learned from until the fast loop has pulled it under this threshold.
+FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR = 0.15
 FEEDFORWARD_MAX_RELATIVE_STEP_PER_UPDATE = 0.3
 FEEDFORWARD_MAX_OBSERVATIONS_CAP = 50.0
 # Not wired to the UI: a single shared A_FF(f) curve is learned from both
@@ -1025,13 +1047,17 @@ class SineForceControlEnvironment(AbstractEnvironment):
             # Learn from what was actually achieved (post slew/clip) -- that
             # is what the *next* force measurement will actually reflect --
             # rather than a possibly still-limited requested value. Only
-            # when trustworthy (fast loop's own ratio-law request was not
-            # held/saturated, tracking estimator settled -- see
-            # ControllerStatus and ForceTrackingResult.valid). Written into
-            # feedforward_map (the write side) -- takes effect for
-            # composition only once published at the next leg boundary
-            # above.
-            trust = ctrl_result.status is ControllerStatus.OK
+            # when trustworthy: fast loop's own ratio-law request was not
+            # held/saturated, tracking estimator settled (see
+            # ControllerStatus and ForceTrackingResult.valid) -- AND the
+            # force error is already reasonably small (see
+            # FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR docstring: OK status
+            # alone does not mean the loop has actually settled, e.g. mid-
+            # ring-down). Written into feedforward_map (the write side) --
+            # takes effect for composition only once published at the next
+            # leg boundary above.
+            trust = (ctrl_result.status is ControllerStatus.OK
+                      and abs(ctrl_result.relative_force_error) <= FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR)
             learn_result = self.feedforward_map.update(
                 frequency, observed_value=self.total_drive_amplitude, trust=trust, direction=direction)
 

@@ -142,7 +142,12 @@ def run_simulation(f_start=5.0, f_stop=2000.0, target_force=6.0, n_legs=5,
                                       trim_controller.max_drive_amplitude)
             trim_controller.drive_amplitude = achieved_trim_gain  # anti-windup resync
 
-            trust = ctrl_result.status is ControllerStatus.OK
+            # Mirrors FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR in
+            # components/sine_force_control_environment.py: OK status alone
+            # doesn't mean settled -- e.g. mid a startup ring-down -- so also
+            # require the error to already be reasonably small.
+            trust = (ctrl_result.status is ControllerStatus.OK
+                     and abs(ctrl_result.relative_force_error) <= 0.15)
             learn_result = feedforward_map.update(f_end, observed_value=total_drive_amplitude,
                                                     trust=trust, direction=direction)
             ff_value = composition.feedforward_value
