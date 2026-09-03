@@ -77,6 +77,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 import copy
+import json
 import os
 import time
 import traceback
@@ -107,6 +108,15 @@ MAX_PLOT_SAMPLES = 2000
 # meaningful physical limit, since the configured sweep frequency itself
 # never goes below f_start/f_stop (>0, validated at environment setup).
 MIN_ADAPTIVE_TRACKING_BANDWIDTH_HZ = 0.01
+# Where the definition tab's "last used settings" (see
+# SineForceControlUI._save_last_used_settings/_restore_last_used_settings)
+# are remembered across application restarts. A dotfile under the user's
+# home directory -- not inside the repo/install tree -- so it is never
+# picked up by version control and works the same regardless of where the
+# application happens to be installed/run from (no existing user-config-
+# directory convention exists elsewhere in this codebase to match instead).
+LAST_USED_SETTINGS_PATH = os.path.join(
+    os.path.expanduser('~'), '.rattlesnake', 'sine_force_control_last_settings.json')
 
 # Feedforward learning knobs that are deliberately *not* exposed as UI
 # fields (unlike Learning Rate / Feedforward Min-Max / Bins-per-Decade,
@@ -356,6 +366,7 @@ class SineForceControlUI(AbstractUI):
 
         self.complete_ui()
         self.connect_callbacks()
+        self._restore_last_used_settings()
 
     def complete_ui(self):
         self.definition_widget.sweep_type_selector.addItems(['Linear', 'Logarithmic'])
@@ -435,6 +446,11 @@ class SineForceControlUI(AbstractUI):
             data_acquisition_parameters.sample_rate / 2)
         self.definition_widget.start_frequency_selector.setMaximum(
             data_acquisition_parameters.sample_rate / 2)
+        # Re-applied here (in addition to __init__) specifically so the
+        # force-channel selection -- only populated above, once the channel
+        # table is known -- gets restored too; harmless no-op for every
+        # other field, which was already restored in __init__.
+        self._restore_last_used_settings()
 
     def collect_environment_definition_parameters(self) -> SineForceControlParameters:
         return SineForceControlParameters.from_ui(self)
@@ -492,58 +508,99 @@ class SineForceControlUI(AbstractUI):
                     ' at the lowest swept frequency, adaptive' if data.adaptive_tracking_bandwidth else '',
                     settle_time_s))
         self.environment_parameters = data
+        self._save_last_used_settings(data)
         return data
+
+    def _apply_definition_settings(self, get):
+        """Populates every definition-tab field from ``get(name, default)``.
+
+        Shared by :meth:`retrieve_metadata` (reads a saved test's netCDF
+        group attributes) and :meth:`_restore_last_used_settings` (reads a
+        small local JSON file of the last-used settings, see that method)
+        so the two persistence paths -- "reopen a saved test" and "just
+        remember what I last typed" -- cannot drift apart into two
+        different field lists.
+        """
+        widget = self.definition_widget
+        widget.sweep_type_selector.setCurrentText(
+            SWEEP_TYPE_INTERNAL_TO_UI[get('sweep_type', 'linear')])
+        widget.start_frequency_selector.setValue(get('f_start', 20.0))
+        widget.stop_frequency_selector.setValue(get('f_stop', 500.0))
+        widget.sweep_rate_selector.setValue(get('sweep_rate', 10.0))
+        widget.direction_selector.setCurrentText(
+            DIRECTION_INTERNAL_TO_UI[get('direction', 'up')])
+        widget.repeat_sweep_checkbox.setChecked(bool(get('repeat', False)))
+        widget.num_sweeps_selector.setValue(int(get('num_sweeps', 0)))
+        widget.alternate_direction_checkbox.setChecked(bool(get('alternate_direction', False)))
+        channel_index = get('force_channel_index', None)
+        if channel_index is not None:
+            index = widget.force_channel_selector.findData(int(channel_index))
+            if index >= 0:
+                widget.force_channel_selector.setCurrentIndex(index)
+        widget.target_force_selector.setValue(get('target_force', 5.0))
+        widget.force_floor_selector.setValue(get('force_floor', 0.1))
+        widget.tracking_bandwidth_selector.setValue(get('tracking_bandwidth_hz', 5.0))
+        widget.adaptive_tracking_bandwidth_checkbox.setChecked(
+            bool(get('adaptive_tracking_bandwidth', False)))
+        widget.tracking_cycles_selector.setValue(float(get('tracking_cycles', 3.0)))
+        widget.controller_alpha_selector.setValue(get('controller_alpha', 0.5))
+        widget.control_update_period_selector.setValue(get('control_update_period_s', 0.1))
+        widget.initial_drive_selector.setValue(get('initial_drive_v', 0.05))
+        widget.max_drive_selector.setValue(get('max_drive_v', 1.25))
+        widget.abort_drive_selector.setValue(get('abort_drive_v', 1.4))
+        widget.max_drive_step_selector.setValue(get('max_drive_step_v', 0.02))
+        widget.ramp_time_selector.setValue(get('ramp_time_s', 1.0))
+        widget.pre_dwell_time_selector.setValue(get('pre_dwell_time_s', 0.0))
+        widget.feedforward_enabled_checkbox.setChecked(bool(get('feedforward_enabled', False)))
+        widget.feedforward_learning_rate_selector.setValue(float(get('feedforward_learning_rate', 0.2)))
+        widget.feedforward_min_selector.setValue(float(get('feedforward_min_v', 0.05)))
+        widget.feedforward_max_selector.setValue(float(get('feedforward_max_v', 1.25)))
+        widget.feedforward_trim_gain_max_selector.setValue(float(get('feedforward_trim_gain_max', 3.0)))
+        widget.feedforward_bins_per_decade_selector.setValue(float(get('feedforward_bins_per_decade', 10.0)))
+        widget.feedforward_file_selector.setText(str(get('feedforward_file', '')))
+        widget.feedforward_load_on_start_checkbox.setChecked(bool(get('feedforward_load_on_start', False)))
+        widget.feedforward_save_on_finish_checkbox.setChecked(bool(get('feedforward_save_on_finish', False)))
 
     def retrieve_metadata(self, netcdf_handle: nc4._netCDF4.Dataset):
         group = netcdf_handle.groups[self.environment_name]
-        self.definition_widget.sweep_type_selector.setCurrentText(
-            SWEEP_TYPE_INTERNAL_TO_UI[group.sweep_type])
-        self.definition_widget.start_frequency_selector.setValue(group.f_start)
-        self.definition_widget.stop_frequency_selector.setValue(group.f_stop)
-        self.definition_widget.sweep_rate_selector.setValue(group.sweep_rate)
-        self.definition_widget.direction_selector.setCurrentText(
-            DIRECTION_INTERNAL_TO_UI[group.direction])
-        self.definition_widget.repeat_sweep_checkbox.setChecked(bool(group.repeat))
-        self.definition_widget.num_sweeps_selector.setValue(
-            int(getattr(group, 'num_sweeps', 0)))
-        self.definition_widget.alternate_direction_checkbox.setChecked(
-            bool(getattr(group, 'alternate_direction', 0)))
-        index = self.definition_widget.force_channel_selector.findData(int(group.force_channel_index))
-        if index >= 0:
-            self.definition_widget.force_channel_selector.setCurrentIndex(index)
-        self.definition_widget.target_force_selector.setValue(group.target_force)
-        self.definition_widget.force_floor_selector.setValue(group.force_floor)
-        self.definition_widget.tracking_bandwidth_selector.setValue(group.tracking_bandwidth_hz)
-        self.definition_widget.adaptive_tracking_bandwidth_checkbox.setChecked(
-            bool(getattr(group, 'adaptive_tracking_bandwidth', 0)))
-        self.definition_widget.tracking_cycles_selector.setValue(
-            float(getattr(group, 'tracking_cycles', 3.0)))
-        self.definition_widget.controller_alpha_selector.setValue(group.controller_alpha)
-        self.definition_widget.control_update_period_selector.setValue(group.control_update_period_s)
-        self.definition_widget.initial_drive_selector.setValue(group.initial_drive_v)
-        self.definition_widget.max_drive_selector.setValue(group.max_drive_v)
-        self.definition_widget.abort_drive_selector.setValue(group.abort_drive_v)
-        self.definition_widget.max_drive_step_selector.setValue(group.max_drive_step_v)
-        self.definition_widget.ramp_time_selector.setValue(group.ramp_time_s)
-        self.definition_widget.pre_dwell_time_selector.setValue(group.pre_dwell_time_s)
-        self.definition_widget.feedforward_enabled_checkbox.setChecked(
-            bool(getattr(group, 'feedforward_enabled', 0)))
-        self.definition_widget.feedforward_learning_rate_selector.setValue(
-            float(getattr(group, 'feedforward_learning_rate', 0.2)))
-        self.definition_widget.feedforward_min_selector.setValue(
-            float(getattr(group, 'feedforward_min_v', 0.05)))
-        self.definition_widget.feedforward_max_selector.setValue(
-            float(getattr(group, 'feedforward_max_v', 1.25)))
-        self.definition_widget.feedforward_trim_gain_max_selector.setValue(
-            float(getattr(group, 'feedforward_trim_gain_max', 3.0)))
-        self.definition_widget.feedforward_bins_per_decade_selector.setValue(
-            float(getattr(group, 'feedforward_bins_per_decade', 10.0)))
-        self.definition_widget.feedforward_file_selector.setText(
-            str(getattr(group, 'feedforward_file', '')))
-        self.definition_widget.feedforward_load_on_start_checkbox.setChecked(
-            bool(getattr(group, 'feedforward_load_on_start', 0)))
-        self.definition_widget.feedforward_save_on_finish_checkbox.setChecked(
-            bool(getattr(group, 'feedforward_save_on_finish', 0)))
+        self._apply_definition_settings(lambda key, default: getattr(group, key, default))
+
+    def _restore_last_used_settings(self):
+        """Populates the definition tab from the last successfully-started
+        test's settings, if any were saved (see :meth:`_save_last_used_settings`).
+
+        Deliberately silent/best-effort: a missing, corrupt, or
+        outdated-format file must never prevent the UI from opening --
+        it just falls back to the .ui file's own hardcoded defaults, same
+        as if this feature did not exist.
+        """
+        try:
+            with open(LAST_USED_SETTINGS_PATH, 'r') as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            return
+        try:
+            self._apply_definition_settings(lambda key, default: saved.get(key, default))
+        except (KeyError, ValueError, TypeError) as exc:
+            self.log('Could not restore last-used settings: {:}'.format(exc))
+
+    def _save_last_used_settings(self, data: SineForceControlParameters):
+        """Saves ``data`` (the just-validated settings for a test about to
+        run -- see :meth:`initialize_environment`) as the "last used"
+        settings, so the next time this environment's definition tab is
+        opened it starts pre-filled with these instead of the .ui file's
+        hardcoded defaults. Deliberately hooked on successful validation
+        (not on every keystroke or on a timer) so only a configuration that
+        was actually used for a real test is ever remembered -- e.g. a
+        forgotten Sweep Type change mid-edit, as long as it is never
+        actually run, will not silently become tomorrow's default.
+        """
+        try:
+            os.makedirs(os.path.dirname(LAST_USED_SETTINGS_PATH), exist_ok=True)
+            with open(LAST_USED_SETTINGS_PATH, 'w') as f:
+                json.dump(vars(data), f, indent=2)
+        except OSError as exc:
+            self.log('Could not save last-used settings: {:}'.format(exc))
 
     def create_netcdf_file(self, filename):
         self.netcdf_handle = nc4.Dataset(filename, 'w', format='NETCDF4', clobber=True)
