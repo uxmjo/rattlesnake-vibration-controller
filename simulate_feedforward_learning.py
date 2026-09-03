@@ -31,6 +31,7 @@ Produces PNG plots (frequency-response-vs-sweep, feedback-correction-vs-sweep,
 force-vs-time) and prints a convergence summary.
 """
 import argparse
+import copy
 import os
 
 import numpy as np
@@ -100,6 +101,17 @@ def run_simulation(f_start=5.0, f_stop=2000.0, target_force=6.0, n_legs=5,
     max_drive_step_v = 3.0
     total_drive_amplitude = (feedforward_map.initial_estimate if feedforward_map is not None
                               else trim_controller.drive_amplitude)
+    # Composition reads from a published snapshot, refreshed only at
+    # sweep-leg boundaries -- composing directly from the same instance
+    # being learned from every control update creates a second, fast
+    # feedback loop (map learns from the composed command; the composed
+    # command immediately depends on what was just learned) that measurably
+    # destabilizes tracking -- confirmed to make even the first,
+    # initially-empty leg track *worse* than feedforward disabled entirely.
+    # See SineForceControlEnvironment.initialize_environment_test_parameters
+    # for the identical split in the real environment.
+    published_map = copy.deepcopy(feedforward_map) if feedforward_map is not None else None
+    committed_leg = 0
 
     leg_duration = gen.sweep_duration
     n_total = int(n_legs * leg_duration * FS)
@@ -119,8 +131,11 @@ def run_simulation(f_start=5.0, f_stop=2000.0, target_force=6.0, n_legs=5,
         f_end = float(freq[-1])
 
         if feedforward_map is not None:
+            if leg != committed_leg:
+                published_map = copy.deepcopy(feedforward_map)
+                committed_leg = leg
             composition = compose_drive_amplitude(
-                feedforward_map, f_end, ctrl_result.drive_amplitude, total_drive_amplitude,
+                published_map, f_end, ctrl_result.drive_amplitude, total_drive_amplitude,
                 max_drive_v, max_drive_step_v, direction=direction)
             total_drive_amplitude = composition.total_drive_amplitude
             achieved_trim_gain = min(max(composition.achieved_trim_gain, 0.0),

@@ -764,6 +764,8 @@ class SineForceControlEnvironment(AbstractEnvironment):
         # disabled/misconfigured feedforward layer cannot affect the fast
         # loop at all.
         self.feedforward_map = None
+        self.feedforward_map_published = None
+        self._feedforward_committed_leg = 0
         self.total_drive_amplitude = 0.0
         self._last_feedforward_value = float('nan')
         self._last_feedback_correction_pct = float('nan')
@@ -851,6 +853,24 @@ class SineForceControlEnvironment(AbstractEnvironment):
                 except (OSError, ValueError, KeyError) as exc:
                     self.log('Could not load feedforward map ({:}) -- starting from an empty map: {:}'.format(
                         environment_parameters.feedforward_file, exc))
+            # self.feedforward_map accumulates learning every control update
+            # (the "write" side). self.feedforward_map_published is a frozen
+            # snapshot of it that composition actually reads from (the
+            # "read" side), refreshed only at sweep-leg boundaries (see
+            # _update_feedforward_and_compose). This split is required, not
+            # just an optimization: composing directly from the same map
+            # instance that is simultaneously being learned from creates a
+            # second, fast feedback loop (map learns from the composed
+            # command; the composed command immediately depends on what was
+            # just learned) layered on top of the fast loop's own feedback
+            # -- verified to cause materially worse tracking (larger,
+            # sustained oscillation) than feedforward being disabled
+            # entirely, even on the very first sweep leg with an initially
+            # empty map. Per-leg publishing also directly matches the
+            # intended design (learn *across* sweeps, not within one -- see
+            # module docstring) rather than being merely a stability patch.
+            self.feedforward_map_published = copy.deepcopy(self.feedforward_map)
+            self._feedforward_committed_leg = 0
             self.controller = ForceAmplitudeController(
                 alpha=environment_parameters.controller_alpha,
                 force_floor=environment_parameters.force_floor,
@@ -859,6 +879,7 @@ class SineForceControlEnvironment(AbstractEnvironment):
                 initial_drive_amplitude=1.0)
         else:
             self.feedforward_map = None
+            self.feedforward_map_published = None
             self.controller = ForceAmplitudeController(
                 alpha=environment_parameters.controller_alpha,
                 force_floor=environment_parameters.force_floor,
@@ -919,8 +940,17 @@ class SineForceControlEnvironment(AbstractEnvironment):
             self._last_feedforward_confidence = float('nan')
             self._last_learning_applied = False
         else:
+            # Publish this run's learning-so-far into the read-side map only
+            # at sweep-leg boundaries (never mid-leg) -- see
+            # initialize_environment_test_parameters for why composing
+            # directly from the same instance being learned from would
+            # otherwise create a destructive fast feedback loop.
+            if leg != self._feedforward_committed_leg:
+                self.feedforward_map_published = copy.deepcopy(self.feedforward_map)
+                self._feedforward_committed_leg = leg
+
             composition = compose_drive_amplitude(
-                self.feedforward_map, frequency, ctrl_result.drive_amplitude,
+                self.feedforward_map_published, frequency, ctrl_result.drive_amplitude,
                 self.total_drive_amplitude, self.environment_parameters.max_drive_v,
                 self.environment_parameters.max_drive_step_v, direction=direction)
             self.total_drive_amplitude = composition.total_drive_amplitude
@@ -940,14 +970,17 @@ class SineForceControlEnvironment(AbstractEnvironment):
             # rather than a possibly still-limited requested value. Only
             # when trustworthy (fast loop's own ratio-law request was not
             # held/saturated, tracking estimator settled -- see
-            # ControllerStatus and ForceTrackingResult.valid).
+            # ControllerStatus and ForceTrackingResult.valid). Written into
+            # feedforward_map (the write side) -- takes effect for
+            # composition only once published at the next leg boundary
+            # above.
             trust = ctrl_result.status is ControllerStatus.OK
             learn_result = self.feedforward_map.update(
                 frequency, observed_value=self.total_drive_amplitude, trust=trust, direction=direction)
 
             self._last_feedforward_value = composition.feedforward_value
             self._last_feedback_correction_pct = (achieved_trim_gain - 1.0) * 100.0
-            self._last_feedforward_confidence = self.feedforward_map.confidence(frequency, direction=direction)
+            self._last_feedforward_confidence = self.feedforward_map_published.confidence(frequency, direction=direction)
             self._last_learning_applied = learn_result.updated
 
     def _publish_diagnostics(self, frequency):
