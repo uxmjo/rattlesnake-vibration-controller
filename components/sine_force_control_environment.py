@@ -148,7 +148,39 @@ FEEDFORWARD_OUTLIER_REJECT_PERSISTENCE = 3.0
 # ringing" from "genuinely far off target for some other reason" -- a
 # genuinely large, real, converged error at some frequency also will not
 # be learned from until the fast loop has pulled it under this threshold.
-FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR = 0.15
+#
+# 0.07 (tightened down from an initial 0.15 -- see
+# FEEDFORWARD_LEARNING_MIN_SETTLED_STREAK_S docstring for why 0.15 was
+# verified, on real hardware, to still be too loose): a ring-down does not
+# monotonically decay -- it can keep *growing* for several seconds before
+# finally decaying, so individual samples of 8-12% error partway through
+# are not "nearly settled", they are still firmly inside the transient. A
+# tighter bound plus the settled-streak requirement below together is what
+# was actually verified (by replaying real logged data through both gates)
+# to exclude an entire observed transient that grew from ~5% past 20%
+# before decaying back down over roughly 10 seconds.
+FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR = 0.07
+# Learning additionally requires the error to have been continuously under
+# FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR (and ControllerStatus.OK) for at
+# least this many consecutive seconds -- i.e. an established "settled
+# streak", reset back to zero the instant either condition fails -- before
+# any single observation is trusted. Deliberately time-based (via
+# elapsed_time), not a fixed sample count, so it is independent of
+# control_update_period_s.
+#
+# This supersedes an earlier, simpler attempt at the same problem: a *fixed*
+# holdoff window after each sweep-leg boundary, sized from the tracking
+# filter's own settle-time formula (5 tau at the narrowest configured
+# bandwidth). That fixed window was measured (on real hardware) to expire
+# too early -- the settling transient at the low-frequency end of a sweep
+# does not decay in a fixed, predictable duration matching the filter's own
+# open-loop time constant; the *closed loop* (filter + fast loop reacting to
+# a continuously-changing target) settles slower and less predictably,
+# sometimes growing for several seconds before finally decaying. A streak
+# that keeps resetting for as long as the real signal keeps misbehaving --
+# regardless of why, or how long that takes -- is more robust than
+# committing to any single guessed duration.
+FEEDFORWARD_LEARNING_MIN_SETTLED_STREAK_S = 3.0
 FEEDFORWARD_MAX_RELATIVE_STEP_PER_UPDATE = 0.3
 FEEDFORWARD_MAX_OBSERVATIONS_CAP = 50.0
 # Not wired to the UI: a single shared A_FF(f) curve is learned from both
@@ -845,8 +877,7 @@ class SineForceControlEnvironment(AbstractEnvironment):
         self.feedforward_map = None
         self.feedforward_map_published = None
         self._feedforward_committed_leg = 0
-        self._feedforward_learning_leg_holdoff_s = 0.0
-        self._feedforward_leg_start_time = 0.0
+        self._feedforward_untrusted_since = 0.0
         self.total_drive_amplitude = 0.0
         self._last_feedforward_value = float('nan')
         self._last_feedback_correction_pct = float('nan')
@@ -952,26 +983,7 @@ class SineForceControlEnvironment(AbstractEnvironment):
             # module docstring) rather than being merely a stability patch.
             self.feedforward_map_published = copy.deepcopy(self.feedforward_map)
             self._feedforward_committed_leg = 0
-            # Learning is additionally held off for this long after *every*
-            # sweep-leg boundary (not just the very first), tracked via
-            # _feedforward_leg_start_time below -- same settle-time formula
-            # already used for the "Control Update Period May Be Too Short"
-            # warning in SineForceControlUI.initialize_environment. Confirmed
-            # necessary: a fresh startup-style settling transient re-occurs
-            # at *every* direction turnaround (worst at f_start, where the
-            # filter is slowest), not only at the very start of the test --
-            # Pre-Sweep Dwell Time only covers that first start. Without this
-            # holdoff, every turnaround keeps re-teaching a small ring-down
-            # into the low-frequency bins, indefinitely, run after run, even
-            # with FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR already in place.
-            if environment_parameters.adaptive_tracking_bandwidth:
-                worst_case_bandwidth_hz = ForceTrackingEstimator.bandwidth_for_tracking_cycles(
-                    min(environment_parameters.f_start, environment_parameters.f_stop),
-                    environment_parameters.tracking_cycles)
-            else:
-                worst_case_bandwidth_hz = environment_parameters.tracking_bandwidth_hz
-            self._feedforward_learning_leg_holdoff_s = 5.0 / (2 * np.pi * worst_case_bandwidth_hz)
-            self._feedforward_leg_start_time = 0.0
+            self._feedforward_untrusted_since = 0.0
             self.controller = ForceAmplitudeController(
                 alpha=environment_parameters.controller_alpha,
                 force_floor=environment_parameters.force_floor,
@@ -1049,7 +1061,14 @@ class SineForceControlEnvironment(AbstractEnvironment):
             if leg != self._feedforward_committed_leg:
                 self.feedforward_map_published = copy.deepcopy(self.feedforward_map)
                 self._feedforward_committed_leg = leg
-                self._feedforward_leg_start_time = self.elapsed_time
+                # Also restarts the settled-streak clock (see
+                # FEEDFORWARD_LEARNING_MIN_SETTLED_STREAK_S) -- a direction
+                # turnaround is a new transient risk in its own right,
+                # regardless of how settled the *previous* leg's tail was;
+                # without this, a calm previous-leg ending could otherwise
+                # make the streak already "old" and start trusting the very
+                # first samples of the new leg immediately.
+                self._feedforward_untrusted_since = self.elapsed_time
 
             composition = compose_drive_amplitude(
                 self.feedforward_map_published, frequency, ctrl_result.drive_amplitude,
@@ -1072,22 +1091,23 @@ class SineForceControlEnvironment(AbstractEnvironment):
             # rather than a possibly still-limited requested value. Only
             # when trustworthy: fast loop's own ratio-law request was not
             # held/saturated, tracking estimator settled (see
-            # ControllerStatus and ForceTrackingResult.valid) -- AND the
-            # force error is already reasonably small (see
+            # ControllerStatus and ForceTrackingResult.valid), the force
+            # error is already reasonably small (see
             # FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR docstring: OK status
             # alone does not mean the loop has actually settled, e.g. mid-
-            # ring-down) -- AND enough time has passed since this sweep leg
-            # started (see _feedforward_learning_leg_holdoff_s docstring in
-            # initialize_environment_test_parameters: a fresh settling
-            # transient re-occurs at every direction turnaround, not only
-            # the very first leg, and can pass the error-magnitude gate
-            # anyway during its decaying tail). Written into feedforward_map
-            # (the write side) -- takes effect for composition only once
-            # published at the next leg boundary above.
-            trust = (ctrl_result.status is ControllerStatus.OK
-                      and abs(ctrl_result.relative_force_error) <= FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR
-                      and (self.elapsed_time - self._feedforward_leg_start_time)
-                          >= self._feedforward_learning_leg_holdoff_s)
+            # ring-down) -- AND that has now been true continuously for a
+            # while (see FEEDFORWARD_LEARNING_MIN_SETTLED_STREAK_S
+            # docstring): a single sample dipping under the error threshold
+            # mid-transient is not the same as having actually settled.
+            # Written into feedforward_map (the write side) -- takes effect
+            # for composition only once published at the next leg boundary
+            # above.
+            sample_ok = (ctrl_result.status is ControllerStatus.OK
+                         and abs(ctrl_result.relative_force_error) <= FEEDFORWARD_LEARNING_MAX_RELATIVE_ERROR)
+            if not sample_ok:
+                self._feedforward_untrusted_since = self.elapsed_time
+            trust = (sample_ok and (self.elapsed_time - self._feedforward_untrusted_since)
+                     >= FEEDFORWARD_LEARNING_MIN_SETTLED_STREAK_S)
             learn_result = self.feedforward_map.update(
                 frequency, observed_value=self.total_drive_amplitude, trust=trust, direction=direction)
 
