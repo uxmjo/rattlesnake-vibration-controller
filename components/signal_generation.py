@@ -38,6 +38,7 @@ class SignalTypes(Enum):
     CPSD = 6
     TRANSIENT = 7
     CONTINUOUSTRANSIENT = 8
+    CONSTANT_FORCE_CHIRP = 9
 
 def cola(signal_samples : int,end_samples : int,
          signals : np.ndarray,window_name : str,window_exponent : float = 0.5):
@@ -312,6 +313,92 @@ class ChirpSignalGenerator(SignalGenerator):
     def ready_for_next_output(self):
         return True
     
+class ConstantForceChirpSignalGenerator(SignalGenerator):
+    """Continuously phase-advancing swept-sine (chirp) generator spanning
+    many output frames, whose per-signal voltage amplitude can be updated
+    between frames.
+
+    ``ChirpSignalGenerator`` above generates a single frame-length sweep
+    once and then replays that identical frame forever -- it has no
+    ``update_parameters`` hook and is intended for short, fixed-level modal
+    testing excitation. This class instead tracks phase continuously across
+    frame boundaries (matching the linear-sweep phase law
+    ``phi(t) = 2*pi*(f0*t + 0.5*(df/dt)*t**2)``, the same convention used by
+    ``ChirpSignalGenerator``), so a multi-second sweep can be assembled frame
+    by frame with its amplitude adjusted on the fly. It is used by
+    ``components/constant_force_chirp_environment.py`` to realize a chirp
+    whose voltage amplitude is continuously trimmed so that the *measured
+    force* -- not the output voltage -- stays constant across the sweep.
+    """
+
+    def __init__(self,
+                 level,
+                 sample_rate,
+                 num_samples_per_frame,
+                 num_signals,
+                 start_frequency,
+                 end_frequency,
+                 chirp_duration,
+                 output_oversample):
+        self.sample_rate = sample_rate
+        self.num_samples = num_samples_per_frame
+        self.num_signals = num_signals
+        self.output_oversample = output_oversample
+        self.start_frequency = start_frequency
+        self.end_frequency = end_frequency
+        self.chirp_duration = chirp_duration
+        self.sweep_rate = (end_frequency - start_frequency) / chirp_duration
+        level_array = np.asarray(level, dtype=float)
+        if level_array.ndim == 0:
+            self.level = np.full((num_signals, 1), float(level_array))
+        else:
+            self.level = level_array.reshape(num_signals, 1).copy()
+        # Elapsed sweep time (s) at the start of the *next* frame to be generated
+        self._elapsed_time = 0.0
+        self._finished = False
+
+    @property
+    def ready_for_next_output(self):
+        return True
+
+    def update_parameters(self, level):
+        """Set the voltage amplitude(s) to use starting with the next
+        generated frame. ``level`` may be a scalar or a per-signal array."""
+        level_array = np.asarray(level, dtype=float)
+        if level_array.ndim == 0:
+            self.level[...] = float(level_array)
+        else:
+            self.level[...] = level_array.reshape(self.num_signals, 1)
+
+    @property
+    def current_time(self):
+        """Elapsed sweep time (s) at the start of the next frame to generate."""
+        return self._elapsed_time
+
+    def instantaneous_frequency(self, t):
+        """Instantaneous sweep frequency (Hz) at elapsed sweep time ``t``,
+        clipped to [0, chirp_duration] (matches control_laws.
+        constant_force_chirp_control.LinearChirpProfile.frequency)."""
+        t_clipped = min(max(t, 0.0), self.chirp_duration)
+        return self.start_frequency + self.sweep_rate * t_clipped
+
+    def generate_frame(self):
+        n = self.num_samples * self.output_oversample
+        dt = 1.0 / (self.sample_rate * self.output_oversample)
+        t_local = np.arange(n) * dt
+        t_abs = self._elapsed_time + t_local
+        t_abs_clipped = np.clip(t_abs, 0.0, self.chirp_duration)
+        phase = 2 * np.pi * (self.start_frequency * t_abs_clipped
+                              + 0.5 * self.sweep_rate * t_abs_clipped ** 2)
+        signal = self.level * np.sin(phase)
+
+        frame_duration = self.num_samples / self.sample_rate
+        self._elapsed_time += frame_duration
+        last_frame = self._finished or self._elapsed_time >= self.chirp_duration
+        self._finished = last_frame
+        return signal, last_frame
+
+
 class SineSignalGenerator(SignalGenerator):
     def __init__(self,
                  level,

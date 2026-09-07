@@ -1,0 +1,271 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>constant_force_chirp_definition</class>
+ <widget class="QWidget" name="constant_force_chirp_definition">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>520</width>
+    <height>760</height>
+   </rect>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <widget class="QGroupBox" name="channels_groupbox">
+     <property name="title">
+      <string>Channels</string>
+     </property>
+     <layout class="QFormLayout" name="channels_formLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="output_channel_label">
+        <property name="text"><string>Output (Shaker) Channel</string></property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QComboBox" name="output_channel_selector"/>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="force_channel_label">
+        <property name="text"><string>Force Sensor Channel</string></property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QComboBox" name="force_channel_selector"/>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="acceleration_channel_label">
+        <property name="text"><string>Monitoring Accelerometer Channel(s)</string></property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QListWidget" name="acceleration_channel_selector"/>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="test_definition_groupbox">
+     <property name="title">
+      <string>Constant Force Chirp Parameters</string>
+     </property>
+     <layout class="QFormLayout" name="test_formLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="target_force_label">
+        <property name="text"><string>Target Force (peak) [N]</string></property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QDoubleSpinBox" name="target_force_selector">
+        <property name="decimals"><number>3</number></property>
+        <property name="maximum"><double>1000000.0</double></property>
+        <property name="value"><double>10.0</double></property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="start_frequency_label">
+        <property name="text"><string>Start Frequency [Hz]</string></property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QDoubleSpinBox" name="start_frequency_selector">
+        <property name="decimals"><number>3</number></property>
+        <property name="maximum"><double>1000000.0</double></property>
+        <property name="value"><double>100.0</double></property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="end_frequency_label">
+        <property name="text"><string>End Frequency [Hz]</string></property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QDoubleSpinBox" name="end_frequency_selector">
+        <property name="decimals"><number>3</number></property>
+        <property name="maximum"><double>1000000.0</double></property>
+        <property name="value"><double>2000.0</double></property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="chirp_duration_label">
+        <property name="text"><string>Chirp Duration [s]</string></property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QDoubleSpinBox" name="chirp_duration_selector">
+        <property name="decimals"><number>3</number></property>
+        <property name="maximum"><double>100000.0</double></property>
+        <property name="value"><double>30.0</double></property>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="ramp_time_label">
+        <property name="text"><string>Ramp Time [s]</string></property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QDoubleSpinBox" name="ramp_time_selector">
+        <property name="decimals"><number>3</number></property>
+        <property name="maximum"><double>1000.0</double></property>
+        <property name="value"><double>1.0</double></property>
+       </widget>
+      </item>
+      <item row="5" column="0">
+       <widget class="QLabel" name="minimum_frequency_label">
+        <property name="text"><string>Minimum Identified Frequency [Hz] (0 = use start)</string></property>
+       </widget>
+      </item>
+      <item row="5" column="1">
+       <widget class="QDoubleSpinBox" name="minimum_frequency_selector">
+        <property name="decimals"><number>3</number></property>
+        <property name="maximum"><double>1000000.0</double></property>
+        <property name="value"><double>0.0</double></property>
+       </widget>
+      </item>
+      <item row="6" column="0">
+       <widget class="QLabel" name="maximum_frequency_label">
+        <property name="text"><string>Maximum Identified Frequency [Hz] (0 = use end)</string></property>
+       </widget>
+      </item>
+      <item row="6" column="1">
+       <widget class="QDoubleSpinBox" name="maximum_frequency_selector">
+        <property name="decimals"><number>3</number></property>
+        <property name="maximum"><double>1000000.0</double></property>
+        <property name="value"><double>0.0</double></property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="safety_groupbox">
+     <property name="title">
+      <string>Safety Limits (hard aborts)</string>
+     </property>
+     <layout class="QFormLayout" name="safety_formLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="max_voltage_label">
+        <property name="text"><string>Maximum Output Voltage [V peak]</string></property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QDoubleSpinBox" name="max_voltage_selector">
+        <property name="decimals"><number>3</number></property>
+        <property name="maximum"><double>1000.0</double></property>
+        <property name="value"><double>1.0</double></property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="force_abort_label">
+        <property name="text"><string>Force Abort Level [N peak]</string></property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QDoubleSpinBox" name="force_abort_selector">
+        <property name="decimals"><number>3</number></property>
+        <property name="maximum"><double>1000000.0</double></property>
+        <property name="value"><double>15.0</double></property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="acceleration_abort_label">
+        <property name="text"><string>Acceleration Abort Level [engineering units peak]</string></property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QDoubleSpinBox" name="acceleration_abort_selector">
+        <property name="decimals"><number>3</number></property>
+        <property name="maximum"><double>1000000.0</double></property>
+        <property name="value"><double>50.0</double></property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="advanced_groupbox">
+     <property name="title">
+      <string>Advanced Control Tuning</string>
+     </property>
+     <layout class="QFormLayout" name="advanced_formLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="control_update_rate_label">
+        <property name="text"><string>Control Update Rate [Hz]</string></property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QDoubleSpinBox" name="control_update_rate_selector">
+        <property name="decimals"><number>2</number></property>
+        <property name="minimum"><double>0.1</double></property>
+        <property name="maximum"><double>1000.0</double></property>
+        <property name="value"><double>20.0</double></property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="amplitude_smoothing_label">
+        <property name="text"><string>Amplitude Smoothing (0-1)</string></property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QDoubleSpinBox" name="amplitude_smoothing_selector">
+        <property name="decimals"><number>2</number></property>
+        <property name="minimum"><double>0.01</double></property>
+        <property name="maximum"><double>1.0</double></property>
+        <property name="value"><double>0.25</double></property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="max_gain_step_label">
+        <property name="text"><string>Max Gain Step per Update</string></property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QDoubleSpinBox" name="max_gain_step_selector">
+        <property name="decimals"><number>3</number></property>
+        <property name="minimum"><double>1.001</double></property>
+        <property name="maximum"><double>10.0</double></property>
+        <property name="value"><double>1.15</double></property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="coherence_threshold_label">
+        <property name="text"><string>Coherence Threshold (0-1)</string></property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QDoubleSpinBox" name="coherence_threshold_selector">
+        <property name="decimals"><number>2</number></property>
+        <property name="minimum"><double>0.0</double></property>
+        <property name="maximum"><double>1.0</double></property>
+        <property name="value"><double>0.7</double></property>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="regularization_label">
+        <property name="text"><string>FRF Regularization (fraction of peak |H|)</string></property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QDoubleSpinBox" name="regularization_selector">
+        <property name="decimals"><number>4</number></property>
+        <property name="minimum"><double>0.0001</double></property>
+        <property name="maximum"><double>1.0</double></property>
+        <property name="value"><double>0.03</double></property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <spacer name="verticalSpacer">
+     <property name="orientation"><enum>Qt::Vertical</enum></property>
+     <property name="sizeHint" stdset="0">
+      <size><width>20</width><height>40</height></size>
+     </property>
+    </spacer>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
