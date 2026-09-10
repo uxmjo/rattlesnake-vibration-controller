@@ -34,6 +34,30 @@ import time
 
 BUFFER_SIZE_FACTOR = 3
 
+def _parse_coupling(coupling_value):
+    """Maps a Channel Table "Coupling" entry to an ``nidaqmx.constants.Coupling``
+    value, or returns ``None`` if the field was left blank (in which case the
+    device's default coupling is left untouched).
+
+    Accepts the values NI-DAQmx itself supports (AC/DC/GND) plus the common
+    IEPE/ICP/CCLD aliases, which are AC-coupled by convention (IEPE sensors
+    ride their signal on a DC bias that AC coupling removes)."""
+    if coupling_value is None:
+        return None
+    coupling_str = str(coupling_value).strip().lower()
+    if coupling_str == '':
+        return None
+    if coupling_str in ['ac','ac coupled','ac coupling','iepe','icp','ac icp','ccld']:
+        return nic.Coupling.AC
+    elif coupling_str in ['dc','dc coupled','dc coupling']:
+        return nic.Coupling.DC
+    elif coupling_str in ['gnd','ground']:
+        return nic.Coupling.GND
+    else:
+        raise ValueError(
+            '{:} not a valid coupling.  Must be one of '
+            '["AC","DC","GND","IEPE","ICP","CCLD"] or left blank for the device default'.format(coupling_value))
+
 class NIDAQmxAcquisition(HardwareAcquisition):
     """Class defining the interface between the controller and NI hardware
     
@@ -283,6 +307,22 @@ class NIDAQmxAcquisition(HardwareAcquisition):
                         physical_channel,min_val = min_val,max_val=max_val,
                         units=nic.VoltageUnits.VOLTS
                     )
+            # add_ai_voltage_chan has no excitation parameters of its own (unlike
+            # add_ai_accel_chan/add_ai_force_iepe_chan above), so a channel
+            # configured as "Voltage" would otherwise never power an IEPE/ICP
+            # sensor even if Current Excitation Source/Value are filled in on
+            # the Channel Table. Apply them here so Voltage-type channels can
+            # be used to read the raw voltage of an IEPE-powered sensor.
+            if excitation_source != nic.ExcitationSource.NONE:
+                channel.ai_excit_src = excitation_source
+                channel.ai_excit_val = excitation
+                channel.ai_excit_voltage_or_current = nic.ExcitationVoltageOrCurrent.USE_CURRENT
+        # Coupling is not tied to a particular channel type in the Channel
+        # Table, so it is applied uniformly here regardless of which branch
+        # above created the channel. Left as the device default if blank.
+        coupling = _parse_coupling(channel_data.coupling)
+        if coupling is not None:
+            channel.ai_coupling = coupling
         return channel
     
 class NIDAQmxOutput(HardwareOutput):
